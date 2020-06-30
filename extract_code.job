@@ -4,11 +4,30 @@
 #SBATCH -t 1-00:00:00
 #SBATCH -p gpu_titanrtx_shared
 
-SCRIPTDIR="/home/robertsc/third-party/vq-vae-2-pytorch"
+RUN_TIMESTAMP="20200621-173647"
+N_CKPT= # if not set, takes the last available checkpoint
+
+
+if [ ! -z $SLURM_JOB_ID ];  then
+    # check the original location through scontrol and $SLURM_JOB_ID
+    SCRIPT_DIR=$( dirname $(scontrol show job $SLURM_JOBID | awk -F= '/Command=/{print $2}'))
+else
+    # otherwise: started with bash. Get the real location.
+    SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+fi
+
+CKPT_DIR="$SCRIPT_DIR"/out/"$RUN_TIMESTAMP"/checkpoint
+
+if [ -z "$N_CKPT" ]; then
+    N_CKPT=$(find "$CKPT_DIR/"vqvae_*.pt -printf "%f\n" | tail -1 | cut -d'_' -f 2 | cut -d'.' -f 1)
+fi
+
+CKPT_PATH="$CKPT_DIR"/vqvae_"$N_CKPT".pt
+echo "Found checkpoint path: '$CKPT_PATH'" 
 
 DATASET_NAME="ffhq-dataset"
 DATASET_EXT=".tar"
-DATASET_PATH="$SCRIPTDIR"/datasets/"$DATASET_NAME""$DATASET_EXT"
+DATASET_PATH="$SCRIPT_DIR"/datasets/"$DATASET_NAME""$DATASET_EXT"
 DATASET_SUBPATH="images1024x1024/"
 
 INDIR="$TMPDIR"
@@ -20,11 +39,9 @@ echo "- untarring dataset"
 tar -xf "$INDIR"/"$DATASET_NAME".tar -C "$INDIR"
 DATASET_INDIR="$INDIR"/"$DATASET_SUBPATH"
 
-OUTDIR="$SCRIPTDIR"
+OUTDIR="$SCRIPT_DIR"
 mkdir -p "$OUTDIR"
 
-N_CKPT="560"
-CKPT_PATH="$SCRIPTDIR"/checkpoint/vqvae_"$N_CKPT".pt
 
 echo "- setting up env"
 # Conda env
@@ -38,11 +55,13 @@ module load NCCL
 
 source activate pytorch
 
-SCRIPTPATH="$SCRIPTDIR/extract_code.py"
+SCRIPTPATH="$SCRIPT_DIR/extract_code.py"
+OUT_CODE_PATH="$SCRIPT_DIR"/codes/"$TIMESTAMP"
 
 PYTHON_ARGS="\
---ckpt "$CKPT_PATH" \
---name "$SCRIPTDIR"/pretrained_code \
+--size 256 \
+--ckpt $CKPT_PATH \
+--name $SCRIPT_DIR/codes/$RUN_TIMESTAMP\_$N_CKPT \
 $DATASET_INDIR\
 "
 
