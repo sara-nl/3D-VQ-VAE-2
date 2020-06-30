@@ -1,0 +1,50 @@
+#!/bin/bash
+
+#SBATCH -N 1
+#SBATCH -t 1-00:00:00
+#SBATCH -p gpu_titanrtx
+
+SCRIPTDIR="/home/robertsc/third-party/vq-vae-2-pytorch"
+
+DATASET_NAME="ffhq-dataset"
+DATASET_EXT=".tar"
+DATASET_PATH="$SCRIPTDIR"/datasets/"$DATASET_NAME""$DATASET_EXT"
+DATASET_SUBPATH="images1024x1024/"
+
+INDIR="$TMPDIR"
+mkdir -p "$INDIR"
+
+echo "- copying dataset"
+cp "$DATASET_PATH" "$INDIR"
+echo "- untarring dataset"
+tar -xf "$INDIR"/"$DATASET_NAME".tar -C "$INDIR"
+DATASET_INDIR="$INDIR"/"$DATASET_SUBPATH"
+
+OUTDIR="$SCRIPTDIR"/out
+mkdir -p "$OUTDIR"
+
+
+echo "- setting up env"
+# Conda env
+module load 2019
+module load Miniconda2
+
+# Cuda/cuDNN
+module load cuDNN
+
+module load NCCL
+
+source activate pytorch
+
+SCRIPTPATH="$SCRIPTDIR/train_vqvae.py"
+
+PYTHON_ARGS="\
+--n_gpu 4 \
+--img-size 256 \
+--batch-size 256 \
+--out-dir $OUTDIR \
+$DATASET_INDIR\
+"
+
+echo "- starting run"
+python "$SCRIPTPATH" $PYTHON_ARGS

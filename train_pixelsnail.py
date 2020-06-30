@@ -39,6 +39,10 @@ def train(args, epoch, loader, model, optimizer, scheduler, device):
         loss = criterion(out, target)
         loss.backward()
 
+        if torch.isnan(loss):
+            print("Loss is nan, exiting")
+            exit(1)
+
         if scheduler is not None:
             scheduler.step()
         optimizer.step()
@@ -92,7 +96,7 @@ if __name__ == '__main__':
 
     dataset = LMDBDataset(args.path)
     loader = DataLoader(
-        dataset, batch_size=args.batch, shuffle=True, num_workers=4, drop_last=True
+        dataset, batch_size=args.batch, shuffle=True, num_workers=4, drop_last=True, pin_memory=True
     )
 
     ckpt = {}

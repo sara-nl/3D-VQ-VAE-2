@@ -1,0 +1,50 @@
+#!/bin/bash
+
+#SBATCH -N 1
+#SBATCH -t 1-00:00:00
+#SBATCH -p gpu_titanrtx_shared
+
+SCRIPTDIR="/home/robertsc/third-party/vq-vae-2-pytorch"
+
+DATASET_NAME="ffhq-dataset"
+DATASET_EXT=".tar"
+DATASET_PATH="$SCRIPTDIR"/datasets/"$DATASET_NAME""$DATASET_EXT"
+DATASET_SUBPATH="images1024x1024/"
+
+INDIR="$TMPDIR"
+mkdir -p "$INDIR"
+
+echo "- copying dataset"
+cp "$DATASET_PATH" "$INDIR"
+echo "- untarring dataset"
+tar -xf "$INDIR"/"$DATASET_NAME".tar -C "$INDIR"
+DATASET_INDIR="$INDIR"/"$DATASET_SUBPATH"
+
+OUTDIR="$SCRIPTDIR"
+mkdir -p "$OUTDIR"
+
+N_CKPT="560"
+CKPT_PATH="$SCRIPTDIR"/checkpoint/vqvae_"$N_CKPT".pt
+
+echo "- setting up env"
+# Conda env
+module load 2019
+module load Miniconda2
+
+# Cuda/cuDNN
+module load cuDNN
+
+module load NCCL
+
+source activate pytorch
+
+SCRIPTPATH="$SCRIPTDIR/extract_code.py"
+
+PYTHON_ARGS="\
+--ckpt "$CKPT_PATH" \
+--name "$SCRIPTDIR"/pretrained_code \
+$DATASET_INDIR\
+"
+
+echo "- starting run"
+python "$SCRIPTPATH" $PYTHON_ARGS

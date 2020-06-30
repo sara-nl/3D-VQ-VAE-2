@@ -1,0 +1,68 @@
+#!/bin/bash
+
+#SBATCH -N 1
+#SBATCH -t 01:00:00
+#SBATCH -p gpu_titanrtx_short
+
+DIRECTIONALITY="top" # options ["top", "bottom"]
+LMDB_DATABASE_NAME="pretrained256-code"
+
+
+if [ ! -z $SLURM_JOB_ID ];  then
+    # check the original location through scontrol and $SLURM_JOB_ID
+    SCRIPT_DIR=$( dirname $(scontrol show job $SLURM_JOBID | awk -F= '/Command=/{print $2}'))
+else
+    # otherwise: started with bash. Get the real location.
+    SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+fi
+
+
+IN_DIR="$TMPDIR"
+OUT_DIR="$SCRIPT_DIR"
+
+mkdir -p "$IN_DIR"
+mkdir -p "$OUT_DIR"
+
+
+# Conda env
+module load 2019
+module load Miniconda2
+
+# cuDNN
+module load cuDNN
+module load NCCL 
+
+source activate pytorch
+
+LMDB_DATABASE_PATH="$SCRIPT_DIR"/"$LMDB_DATABASE_NAME"
+SCRIPTPATH="$SCRIPT_DIR/train_pixelsnail.py"
+
+GLOBAL_ARGS="\
+--lr 1e-4 \
+--batch 128 \
+--hier $DIRECTIONALITY \
+--channel 512 \
+--epoch 110 \
+--n_res_channel 512
+--n_res_block 5 \
+--dropout 0.1 \
+--amp O1 \
+--sched cycle\
+"
+
+if [ "$DIRECTIONALITY" == "top" ]; then
+    HIER_ARGS="\
+--n_cond_res_block 0 \
+--n_out_res_block 5\
+"
+else
+    HIER_ARGS="\
+--n_cond_res_block 5 \
+--n_out_res_block 0\
+"
+fi
+
+PYTHON_ARGS="$GLOBAL_ARGS $HIER_ARGS $LMDB_DATABASE_PATH"
+
+
+python $SCRIPTPATH $PYTHON_ARGS

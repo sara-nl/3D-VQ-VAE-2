@@ -1,6 +1,8 @@
 import argparse
 import sys
 import os
+from datetime import datetime
+from pathlib import Path
 
 import torch
 from torch import nn, optim
@@ -14,23 +16,46 @@ from vqvae import VQVAE
 from scheduler import CycleScheduler
 import distributed as dist
 
+def save_samples(model, imgs, epoch, sample_dir, sample_size=25):
+    model.eval()
 
-def train(epoch, loader, model, optimizer, scheduler, device):
+    if sample_size > (batch_size := imgs.shape[0]):
+        sample_size = batch_size
+
+    sample = imgs[:sample_size]
+    with torch.no_grad():
+        out, _ = model(sample)
+
+    utils.save_image(
+        torch.cat([sample, out], 0),
+        f"{str(sample_dir)}/{str(epoch + 1).zfill(5)}.png",
+        nrow=sample_size,
+        normalize=True,
+        range=(-1, 1),
+    )
+
+    model.train()
+
+
+def train(epoch, loader, model, optimizer, scheduler, device, sample_dir):
     if dist.is_primary():
         loader = tqdm(loader)
 
     criterion = nn.MSELoss()
 
     latent_loss_weight = 0.25
-    sample_size = 25
 
     mse_sum = 0
     mse_n = 0
 
     for i, (img, label) in enumerate(loader):
+
         model.zero_grad()
 
         img = img.to(device)
+
+        if dist.is_primary() and i == 0 and epoch % 10 == 0:
+            save_samples(model, img, epoch, sample_dir)
 
         out, latent_loss = model(img)
         recon_loss = criterion(out, img)
@@ -62,34 +87,30 @@ def train(epoch, loader, model, optimizer, scheduler, device):
                 )
             )
 
-            if i % 100 == 0:
-                model.eval()
-
-                sample = img[:sample_size]
-
-                with torch.no_grad():
-                    out, _ = model(sample)
-
-                utils.save_image(
-                    torch.cat([sample, out], 0),
-                    f"sample/{str(epoch + 1).zfill(5)}_{str(i).zfill(5)}.png",
-                    nrow=sample_size,
-                    normalize=True,
-                    range=(-1, 1),
-                )
-
-                model.train()
-
 
 def main(args):
     device = "cuda"
+    current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
+    out_dir = args.out_dir / current_time
+    ckpt_dir = out_dir / 'checkpoint'
+    sample_dir = out_dir / 'sample'
+    if dist.is_primary():
+        if not out_dir.is_dir():
+            out_dir.mkdir(parents=True)
+        if not ckpt_dir.is_dir():
+            ckpt_dir.mkdir()
+        if not sample_dir.is_dir():
+            sample_dir.mkdir()
+        with open(out_dir / 'args.out', mode='w') as f:
+            for k, v in vars(args).items():
+                f.write(f"{k}: {v}\n")
 
     args.distributed = dist.get_world_size() > 1
 
     transform = transforms.Compose(
         [
-            transforms.Resize(args.size),
-            transforms.CenterCrop(args.size),
+            transforms.Resize(args.img_size),
+            transforms.CenterCrop(args.img_size),
             transforms.ToTensor(),
             transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
         ]
@@ -98,7 +119,7 @@ def main(args):
     dataset = datasets.ImageFolder(args.path, transform=transform)
     sampler = dist.data_sampler(dataset, shuffle=True, distributed=args.distributed)
     loader = DataLoader(
-        dataset, batch_size=128 // args.n_gpu, sampler=sampler, num_workers=2
+        dataset, batch_size=args.batch_size, sampler=sampler, num_workers=3*args.n_gpu, pin_memory=True
     )
 
     model = VQVAE().to(device)
@@ -122,10 +143,10 @@ def main(args):
         )
 
     for i in range(args.epoch):
-        train(i, loader, model, optimizer, scheduler, device)
+        train(i, loader, model, optimizer, scheduler, device, sample_dir)
 
         if dist.is_primary():
-            torch.save(model.state_dict(), f"checkpoint/vqvae_{str(i + 1).zfill(3)}.pt")
+            torch.save(model.state_dict(), f"{str(ckpt_dir)}/vqvae_{str(i + 1).zfill(3)}.pt")
 
 
 if __name__ == "__main__":
@@ -139,9 +160,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("--dist_url", default=f"tcp://127.0.0.1:{port}")
 
-    parser.add_argument("--size", type=int, default=256)
+    parser.add_argument("--img-size", type=int, default=256)
+    parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--epoch", type=int, default=560)
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--out-dir", default=Path('./out'), type=Path)
     parser.add_argument("--sched", type=str)
     parser.add_argument("path", type=str)
 
