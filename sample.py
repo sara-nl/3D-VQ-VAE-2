@@ -24,8 +24,8 @@ def sample_model(model, device, batch, size, temperature, condition=None):
     return row
 
 
-def load_model(model, checkpoint, device):
-    ckpt = torch.load(os.path.join('checkpoint', checkpoint))
+def load_model(model, checkpoint_path, device):
+    ckpt = torch.load(checkpoint_path)
 
     
     if 'args' in ckpt:
@@ -64,6 +64,8 @@ def load_model(model, checkpoint, device):
         
     if 'model' in ckpt:
         ckpt = ckpt['model']
+    if next(iter(ckpt.keys())).startswith('module.'): # if model was trained with dataparallel
+        ckpt = {key.replace('module.', ''): value for key, value in ckpt.items()}
 
     model.load_state_dict(ckpt)
     model = model.to(device)
@@ -89,9 +91,9 @@ if __name__ == '__main__':
     model_top = load_model('pixelsnail_top', args.top, device)
     model_bottom = load_model('pixelsnail_bottom', args.bottom, device)
 
-    top_sample = sample_model(model_top, device, args.batch, [32, 32], args.temp)
+    top_sample = sample_model(model_top, device, batch=args.batch, size=[32, 32], temperature=args.temp)
     bottom_sample = sample_model(
-        model_bottom, device, args.batch, [64, 64], args.temp, condition=top_sample
+        model_bottom, device, batch=args.batch, size=[64, 64], temperature=args.temp, condition=top_sample
     )
 
     decoded_sample = model_vqvae.decode_code(top_sample, bottom_sample)
