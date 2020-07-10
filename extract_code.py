@@ -56,8 +56,12 @@ if __name__ == '__main__':
     dataset = ImageFileDataset(args.path, transform=transform)
     loader = DataLoader(dataset, batch_size=128, shuffle=False, num_workers=4)
 
+    ckpt = torch.load(args.ckpt)
+    if next(iter(ckpt.keys())).startswith('module.'): # if model was trained with dataparallel
+        ckpt = {key.replace('module.', ''): value for key, value in ckpt.items()}
+
     model = VQVAE()
-    model.load_state_dict(torch.load(args.ckpt))
+    model.load_state_dict(ckpt)
     model = model.to(device)
     model.eval()
 

@@ -7,7 +7,7 @@
 RUN_TIMESTAMP="20200621-173647"
 N_CKPT= # if not set, takes the last available checkpoint
 
-
+# Getting dir of this script
 if [ ! -z $SLURM_JOB_ID ];  then
     # check the original location through scontrol and $SLURM_JOB_ID
     SCRIPT_DIR=$( dirname $(scontrol show job $SLURM_JOBID | awk -F= '/Command=/{print $2}'))
@@ -51,17 +51,16 @@ module load Miniconda2
 # Cuda/cuDNN
 module load cuDNN
 
-module load NCCL
-
 source activate pytorch
 
 SCRIPTPATH="$SCRIPT_DIR/extract_code.py"
 OUT_CODE_PATH="$SCRIPT_DIR"/codes/"$TIMESTAMP"
 
+SIZE="256"
 PYTHON_ARGS="\
 --size 256 \
 --ckpt $CKPT_PATH \
---name $SCRIPT_DIR/codes/$RUN_TIMESTAMP\_$N_CKPT \
+--name $SCRIPT_DIR/codes/$RUN_TIMESTAMP-$SIZE-$N_CKPT \
 $DATASET_INDIR\
 "
 
