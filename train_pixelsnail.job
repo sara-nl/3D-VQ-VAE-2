@@ -1,11 +1,11 @@
 #!/bin/bash
 
 #SBATCH -N 1
-#SBATCH -t 01:00:00
-#SBATCH -p gpu_titanrtx_short
+#SBATCH -t 1-00:00:00
+#SBATCH -p gpu_titanrtx
 
 DIRECTIONALITY="top" # options ["top", "bottom"]
-LMDB_DATABASE_NAME="pretrained256-code"
+LMDB_DATABASE_NAME="20200621-173647-256-442"
 
 
 if [ ! -z $SLURM_JOB_ID ];  then
@@ -30,19 +30,18 @@ module load Miniconda2
 
 # cuDNN
 module load cuDNN
-module load NCCL 
 
 source activate pytorch
 
-LMDB_DATABASE_PATH="$SCRIPT_DIR"/"$LMDB_DATABASE_NAME"
+LMDB_DATABASE_PATH="$SCRIPT_DIR"/codes/"$LMDB_DATABASE_NAME"
 SCRIPTPATH="$SCRIPT_DIR/train_pixelsnail.py"
 
 GLOBAL_ARGS="\
 --lr 1e-4 \
---batch 128 \
+--batch 8 \
 --hier $DIRECTIONALITY \
 --channel 512 \
---epoch 110 \
+--epoch 100 \
 --n_res_channel 512
 --n_res_block 5 \
 --dropout 0.1 \
@@ -64,5 +63,7 @@ fi
 
 PYTHON_ARGS="$GLOBAL_ARGS $HIER_ARGS $LMDB_DATABASE_PATH"
 
+
+python -c "import torch; torch.cuda.empty_cache()"
 
 python $SCRIPTPATH $PYTHON_ARGS

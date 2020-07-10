@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 try:
+    import apex
     from apex import amp
 
 except ImportError:
@@ -22,26 +23,39 @@ def train(args, epoch, loader, model, optimizer, scheduler, device):
 
     criterion = nn.CrossEntropyLoss()
 
+    nan_times = 0
     for i, (top, bottom, label) in enumerate(loader):
         model.zero_grad()
 
-        top = top.to(device)
+        top = top.to(device, non_blocking=True)
 
         if args.hier == 'top':
             target = top
             out, _ = model(top)
 
         elif args.hier == 'bottom':
-            bottom = bottom.to(device)
+            bottom = bottom.to(device, non_blocking=True)
             target = bottom
             out, _ = model(bottom, condition=top)
 
         loss = criterion(out, target)
+        if torch.isnan(loss):
+            print("Loss is nan")
+            torch.save(
+                {'model': model.module.state_dict(), 'args': args, 'top': top, 'bottom': bottom, 'label': label},
+                f'checkpoint/pixelsnail_{args.hier}_nan_{nan_times}.pt',
+            )
+            if nan_times > 5:
+                print("Too many times nan, exiting")
+                exit(1)
+
+            nan_times += 1
+            continue
         loss.backward()
 
-        if torch.isnan(loss):
-            print("Loss is nan, exiting")
-            exit(1)
+        # nn.utils.clip_grad_norm_(model.parameters(), 1)
+
+
 
         if scheduler is not None:
             scheduler.step()
@@ -51,14 +65,16 @@ def train(args, epoch, loader, model, optimizer, scheduler, device):
         correct = (pred == target).float()
         accuracy = correct.sum() / target.numel()
 
-        lr = optimizer.param_groups[0]['lr']
-
-        loader.set_description(
-            (
-                f'epoch: {epoch + 1}; loss: {loss.item():.5f}; '
-                f'acc: {accuracy:.5f}; lr: {lr:.5f}'
+        # lr = optimizer.param_groups[0]['lr']
+        
+        
+        if i % 25 == 0:
+            loader.set_description(
+                (
+                    f'epoch: {epoch + 1}; loss: {loss.item():.5f}; '
+                    f'acc: {accuracy.item():.5f}; lr: {lr:.5f}'
+                )
             )
-        )
 
 
 class PixelTransform:
@@ -96,7 +112,7 @@ if __name__ == '__main__':
 
     dataset = LMDBDataset(args.path)
     loader = DataLoader(
-        dataset, batch_size=args.batch, shuffle=True, num_workers=4, drop_last=True, pin_memory=True
+        dataset, batch_size=args.batch, shuffle=True, num_workers=12, drop_last=True, pin_memory=True
     )
 
     ckpt = {}
@@ -137,13 +153,13 @@ if __name__ == '__main__':
         model.load_state_dict(ckpt['model'])
 
     model = model.to(device)
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, amsgrad=True)
 
     if amp is not None:
         model, optimizer = amp.initialize(model, optimizer, opt_level=args.amp)
 
-    model = nn.DataParallel(model)
-    model = model.to(device)
+    torch.distributed.init_process_group()
+    model = nn.DistributedDataParallel(model)
 
     scheduler = None
     if args.sched == 'cycle':

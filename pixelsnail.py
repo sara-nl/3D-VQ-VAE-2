@@ -112,6 +112,7 @@ class CausalConv2d(nn.Module):
         out = self.pad(input)
 
         if self.causal > 0:
+
             self.conv.conv.weight_v.data[:, :, -1, self.causal :].zero_()
 
         out = self.conv(out)
@@ -142,7 +143,7 @@ class GatedResBlock(nn.Module):
         elif conv == 'causal':
             conv_module = partial(CausalConv2d, padding='causal')
 
-        self.activation = activation(inplace=True)
+        self.activation = activation()
         self.conv1 = conv_module(in_channel, channel, kernel_size)
 
         if auxiliary_channel > 0:
@@ -172,7 +173,6 @@ class GatedResBlock(nn.Module):
             condition = self.condition(condition)
             out += condition
             # out = out + condition.view(condition.shape[0], 1, 1, condition.shape[1])
-
         out = self.gate(out)
         out += input
 
@@ -294,16 +294,14 @@ class PixelBlock(nn.Module):
             out = resblock(out, condition=condition)
 
         if self.attention:
-            key_cat = torch.cat([input, out, background], 1)
-            key = self.key_resblock(key_cat)
-            query_cat = torch.cat([out, background], 1)
-            query = self.query_resblock(query_cat)
+            key = self.key_resblock(torch.cat([input, out, background], 1))
+            query = self.query_resblock(torch.cat([out, background], 1))
+
             attn_out = self.causal_attention(query, key)
             out = self.out_resblock(out, attn_out)
 
         else:
-            bg_cat = torch.cat([out, background], 1)
-            out = self.out(bg_cat)
+            out = self.out(torch.cat([out, background], 1))
 
         return out
 
@@ -390,7 +388,7 @@ class PixelSNAIL(nn.Module):
         for i in range(n_out_res_block):
             out.append(GatedResBlock(channel, res_channel, 1))
 
-        out.extend([nn.ELU(inplace=True), WNConv2d(channel, n_class, 1)])
+        out.extend([nn.ELU(), WNConv2d(channel, n_class, 1)])
 
         self.out = nn.Sequential(*out)
 
