@@ -2,6 +2,7 @@ name: pytorch
 channels:
   - pytorch
   - defaults
+  - conda-forge
 dependencies:
   - _libgcc_mutex=0.1=main
   - blas=1.0=mkl
@@ -46,8 +47,8 @@ dependencies:
   - pytorch=1.5.0=py3.8_cuda10.1.243_cudnn7.6.3_0
   - torchvision=0.6.0=py38_cu101
   - pip:
-    - apex==0.1
+    - "--editable=git+https://github.com/NVIDIA/apex.git#egg=apex"
     - lmdb==0.98
     - torch==1.5.0
-prefix: /home/robertsc/.conda/envs/pytorch
+prefix: ${HOME}/.conda/envs/pytorch
 
