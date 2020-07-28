@@ -42,3 +42,8 @@ Maybe it is better to use larger PixelSNAIL model. Currently model size is reduc
 Note: This is a training sample
 
 ![Sample from Stage 1 (VQ-VAE)](stage1_sample.png)
+
+## Example : MNIST
+In order to run the MNIST example on 4 GPUs:
+
+`CUDA_VISIBLE_DEVICES=0,1,2,3 python pixelsnail_mnist.py`

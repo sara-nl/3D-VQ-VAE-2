@@ -4,6 +4,7 @@ from torch import nn, optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, utils
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 from pixelsnail import PixelSNAIL
 from sample import load_model, sample_model
@@ -72,7 +73,7 @@ def save_samples(model, imgs, epoch, sample_dir, sample_size=25):
 
 if __name__ == '__main__':
     sample = False
-    device = 'cuda'
+    device = torch.device('cuda')
 
     pixelsnail_kwargs = {
         'shape': [28, 28],
@@ -85,22 +86,21 @@ if __name__ == '__main__':
     }
 
     model = PixelSNAIL(**pixelsnail_kwargs)
-    model = model.to(device)
+    model = torch.nn.DataParallel(model, device_ids=[0,1,2,3]).cuda()
+    model.to(device)
 
     if sample: # quick and dirty sampling
         ckpt_path = './checkpoint/mnist_025.pt'
         model.load_state_dict(torch.load(ckpt_path))
         sample = sample_model(model, device, batch=1, size=[28, 28], temperature=1)
-        
-        import matplotlib.pyplot as plt
 
         plt.imshow(sample.permute(1, 0, 2).reshape(28, -1).cpu().numpy())
         plt.show()
     else:
-        epoch = 1
+        epoch = 25
 
         dataset = datasets.MNIST('.', transform=PixelTransform(), download=True)
-        loader = DataLoader(dataset, batch_size=32, shuffle=True, num_workers=4)
+        loader = DataLoader(dataset, batch_size=128, shuffle=True, num_workers=4)
 
         optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
