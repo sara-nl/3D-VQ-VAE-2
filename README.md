@@ -46,4 +46,6 @@ Note: This is a training sample
 ## Example : MNIST
 In order to run the MNIST example on 4 GPUs:
 
-`CUDA_VISIBLE_DEVICES=0,1,2,3 python pixelsnail_mnist.py`
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch pixelsnail_mnist.py --gpu_devices 0 1 2 3 --batch_size 128
+```
