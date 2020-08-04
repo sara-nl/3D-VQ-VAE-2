@@ -4,25 +4,21 @@
 #SBATCH -t 1-00:00:00
 #SBATCH -p gpu_titanrtx
 
-SCRIPTDIR="/home/robertsc/third-party/vq-vae-2-pytorch"
 
-DATASET_NAME="ffhq-dataset"
-DATASET_EXT=".tar"
-DATASET_PATH="$SCRIPTDIR"/datasets/"$DATASET_NAME""$DATASET_EXT"
-DATASET_SUBPATH="images1024x1024/"
+DATASET_NAME="14" # Options ["ffhq-dataset", "14" (ct-slices)]
+CONDA_ENV="pytorch"
 
-INDIR="$TMPDIR"
-mkdir -p "$INDIR"
+if [ ! -z $SLURM_JOB_ID ];  then
+    # check the original location through scontrol and $SLURM_JOB_ID
+    SCRIPT_DIR=$( dirname $(scontrol show job $SLURM_JOBID | awk -F= '/Command=/{print $2}'))
+else
+    # otherwise: started with bash. Get the real location.
+    SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+fi
+echo "Found scriptdir $SCRIPT_DIR"
 
-echo "- copying dataset"
-cp "$DATASET_PATH" "$INDIR"
-echo "- untarring dataset"
-tar -xf "$INDIR"/"$DATASET_NAME".tar -C "$INDIR"
-DATASET_INDIR="$INDIR"/"$DATASET_SUBPATH"
-
-OUTDIR="$SCRIPTDIR"/out
-mkdir -p "$OUTDIR"
-
+# Default dataset path
+DATASET_PATH="$SCRIPT_DIR"/datasets/"$DATASET_NAME"
 
 echo "- setting up env"
 # Conda env
@@ -32,19 +28,48 @@ module load Miniconda2
 # Cuda/cuDNN
 module load cuDNN
 
-module load NCCL
+echo "Activating conda env $CONDA_ENV"
+source activate "$CONDA_ENV"
 
-source activate pytorch
+SCRIPTPATH="$SCRIPT_DIR/train_vqvae.py"
 
-SCRIPTPATH="$SCRIPTDIR/train_vqvae.py"
+INDIR="$TMPDIR"
+mkdir -p "$INDIR"
+echo "Using Indir $INDIR"
+
+if [[ "$DATASET_NAME" == "ffhq-dataset" ]]; then
+    DATASET_SUBPATH="images1024x1024/"
+    DATASET_INDIR="$INDIR"/"$DATASET_SUBPATH"
+    PYTHON_ARGS="\
+--img-size 256 \
+--batch-size 256"
+elif [[ "$DATASET_NAME" == "14" ]] || [[ "$DATASET_NAME" == "14-debug" ]]; then
+    DATASET_PATH="/nfs/radioct/"$DATASET_NAME".tar"
+    DATASET_INDIR="$INDIR"/"$DATASET_NAME"
+    PYTHON_ARGS="\
+--dataset-type ct-slices \
+--img-size 512 \
+--batch-size 64"
+fi
+
+echo "Assuming Dataset path $DATASET_PATH"
+
+echo "- copying dataset"
+cp "$DATASET_PATH" "$INDIR"
+echo "- untarring dataset"
+tar -xf "$INDIR"/"$DATASET_NAME".tar -C "$INDIR"
+
+OUT_DIR="$SCRIPT_DIR"/out
+echo "Using outdir $OUT_DIR"
+mkdir -p "$OUT_DIR"
+
 
 PYTHON_ARGS="\
+$PYTHON_ARGS \
 --n_gpu 4 \
---img-size 256 \
---batch-size 256 \
---out-dir $OUTDIR \
-$DATASET_INDIR\
-"
+--out-dir $OUT_DIR \
+$DATASET_INDIR"
 
 echo "- starting run"
+echo $PYTHON_ARGS
 python "$SCRIPTPATH" $PYTHON_ARGS

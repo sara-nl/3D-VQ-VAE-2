@@ -48,19 +48,23 @@ def train(epoch, loader, model, optimizer, scheduler, device, sample_dir):
     mse_sum = 0
     mse_n = 0
 
-    for i, (img, label) in enumerate(loader):
-
+    for i, (img, _) in enumerate(loader):
         model.zero_grad()
 
-        img = img.to(device)
+        img = img.to(dtype=torch.float, device=device, non_blocking=True)
 
-        if dist.is_primary() and i == 0 and epoch % 10 == 0:
+        if dist.is_primary() and i == 0:
             save_samples(model, img, epoch, sample_dir)
 
         out, latent_loss = model(img)
         recon_loss = criterion(out, img)
         latent_loss = latent_loss.mean()
         loss = recon_loss + latent_loss_weight * latent_loss
+
+        if torch.isnan(loss):
+            print("Loss is NaN! Exiting.")
+            exit(1)
+
         loss.backward()
 
         if scheduler is not None:
@@ -107,22 +111,38 @@ def main(args):
 
     args.distributed = dist.get_world_size() > 1
 
-    transform = transforms.Compose(
-        [
-            transforms.Resize(args.img_size),
-            transforms.CenterCrop(args.img_size),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
-        ]
-    )
+    if args.dataset_type == 'generic-color':
+        transform = transforms.Compose(
+            [
+                transforms.Resize(args.img_size),
+                transforms.CenterCrop(args.img_size),
+                transforms.ToTensor(),
+                transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+            ]
+        )
+        in_channels = 3
 
-    dataset = datasets.ImageFolder(args.path, transform=transform)
-    sampler = dist.data_sampler(dataset, shuffle=True, distributed=args.distributed)
+        dataset = datasets.ImageFolder(args.path, transform=transform)
+        sampler = dist.data_sampler(dataset, shuffle=True, distributed=args.distributed)
+
+    elif args.dataset_type == 'ct-slices':
+        from load_nrrd_dataset import CTSliceDataset, SliceSampler
+
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(0, 1000)
+        ])
+
+        dataset = CTSliceDataset(args.path, transform=transform)
+        sampler = SliceSampler(dataset)
+
+        in_channels = 1
+
     loader = DataLoader(
         dataset, batch_size=args.batch_size, sampler=sampler, num_workers=3*args.n_gpu, pin_memory=True
     )
 
-    model = VQVAE().to(device)
+    model = VQVAE(in_channel=in_channels).to(device)
 
     if args.distributed:
         model = nn.parallel.DistributedDataParallel(
@@ -160,6 +180,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--dist_url", default=f"tcp://127.0.0.1:{port}")
 
+    parser.add_argument("--dataset-type", choices=('generic-color', 'ct-slices'), default='generic-color')
     parser.add_argument("--img-size", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--epoch", type=int, default=560)
