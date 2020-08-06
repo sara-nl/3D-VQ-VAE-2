@@ -31,7 +31,7 @@ class CTSliceDataset(Dataset):
 
         faulty_idx = np.unique(np.where(~(scan_sizes == size).T[np.where(size)[0]])[1])
         if len(faulty_idx):
-            print(f"Found {len(faulty_idx)} scans where their size doesn't match the input size {size}. Ignoring scans {faulty_idx}")
+            print(f"Found {len(faulty_idx)} scans where their size doesn't match the input size {size}. Ignoring scans {self.scans[faulty_idx]}")
         self.scans = np.delete(self.scans, faulty_idx)
         scan_sizes = np.delete(scan_sizes, faulty_idx, axis=0)
 
@@ -39,23 +39,6 @@ class CTSliceDataset(Dataset):
 
         self.cumsum = np.cumsum(np.insert(self.scan_heights, 0, 0))
         num_slices = self.cumsum[-1]
-
-
-
-        hist_array = np.zeros((5000,), dtype=np.int64)
-        for i, scan_path in enumerate(self.scans):
-            print(i)
-            scan = nrrd.read(scan_path)[0]
-            if scan.min() != -1024:
-                print(f"Ignoring scan {scan_path}, min is {scan.min()}")
-                continue
-
-            values, counts = np.unique(scan, return_counts=True)
-            hist_array[values+1024] += counts
-        breakpoint()
-
-
-
 
         self.idx = np.empty((num_slices,), dtype=np.int)
         for i, (start, finish) in enumerate(pairwise(self.cumsum)):
