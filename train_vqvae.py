@@ -126,7 +126,7 @@ def main(args):
         sampler = dist.data_sampler(dataset, shuffle=True, distributed=args.distributed)
 
     elif args.dataset_type == 'ct-slices':
-        from load_nrrd_dataset import CTSliceDataset, SliceSampler
+        from utils import CTSliceDataset, SliceSampler
 
         transform = transforms.Compose([
             transforms.ToTensor(),

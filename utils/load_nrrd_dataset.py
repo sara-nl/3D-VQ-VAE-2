@@ -40,6 +40,23 @@ class CTSliceDataset(Dataset):
         self.cumsum = np.cumsum(np.insert(self.scan_heights, 0, 0))
         num_slices = self.cumsum[-1]
 
+
+
+        hist_array = np.zeros((5000,), dtype=np.int64)
+        for i, scan_path in enumerate(self.scans):
+            print(i)
+            scan = nrrd.read(scan_path)[0]
+            if scan.min() != -1024:
+                print(f"Ignoring scan {scan_path}, min is {scan.min()}")
+                continue
+
+            values, counts = np.unique(scan, return_counts=True)
+            hist_array[values+1024] += counts
+        breakpoint()
+
+
+
+
         self.idx = np.empty((num_slices,), dtype=np.int)
         for i, (start, finish) in enumerate(pairwise(self.cumsum)):
             self.idx[start:finish] = i
@@ -82,6 +99,7 @@ class SliceSampler(Sampler):
 
         self.mode = mode
         self.dataset = data_source
+        self.pairwise_idx_ranges = np.array(list(pairwise(self.dataset.cumsum)))
 
 
     def __iter__(self):
@@ -93,7 +111,7 @@ class SliceSampler(Sampler):
 
         intra_slice_order = np.arange(len(self.dataset))
         if self.mode in ('intra', 'both'):
-            index_ranges = np.array(list(pairwise(self.dataset.cumsum)))[inter_slice_order]
+            index_ranges = self.pairwise_idx_ranges[inter_slice_order]
             for start, finish in index_ranges:
                 np.random.shuffle(intra_slice_order[start:finish])
 
