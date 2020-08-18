@@ -131,7 +131,7 @@ class Decoder(nn.Module):
         for i, (quantization, up) in enumerate(reversed(zip(quantizations, self.up))):
             up_input = quantization
             if i != 0:
-                up_input = torch.cat([up_input, prev_up])
+                up_input = torch.cat([up_input, prev_up], dim=1)
             prev_up = up(up_input)
 
         return prev_up
