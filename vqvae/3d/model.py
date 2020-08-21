@@ -14,7 +14,7 @@ class VQVAE(pl.LightningModule):
         input_channels=1,
         base_network_channels=4,
         n_bottleneck_blocks=3,
-        n_blocks_per_bottleneck=2
+        n_blocks_per_bottleneck=1
     ):
 
         super(VQVAE, self).__init__()
@@ -36,6 +36,8 @@ class VQVAE(pl.LightningModule):
 
 class DownBlock(nn.Module):
     def __init__(self, in_channels, n_down=2):
+        super(DownBlock, self).__init__()
+
         self.layers = nn.Sequential(*(
             FixupResBlock(in_channels*i, in_channels*(i+1), mode='down') for i in range(1, n_down+1)
         ))
@@ -46,12 +48,15 @@ class DownBlock(nn.Module):
 
 class UpBlock(nn.Module):
     def __init__(self, out_channels, aux_channels=0, n_up=2):
+        super(UpBlock, self).__init__()
+        
         # Some slight schenanigans required for the first layer because of possible concat beforehand
-        self.layers = nn.Sequential(*(
-            FixupResBlock(out_channels/i + (aux_channels if i == n_up else 0),
-                          out_channels/(i+1), mode='up')
-            for i in range(1, n_up+1)
-        ))
+        self.layers = []
+        for i in range(n_up):
+            assert out_channels % 2**(i+1) == 0
+            FixupResBlock(out_channels//(2**i) + (aux_channels if i == n_up-1 else 0),
+                          out_channels//(2**(i+1)), mode='up')
+
 
     def forward(self, data):
         return self.layers(data)
@@ -65,7 +70,9 @@ class PreQuantization(nn.Module):
 
         if not last:
             self.upsample = UpBlock(in_channels, n_up=n_up)
-        self.pre_q = FixupResBlock(in_channels/(2**n_up), mode='same')
+
+        pre_q_channels = in_channels//(2**n_up)
+        self.pre_q = FixupResBlock(pre_q_channels, pre_q_channels, mode='same')
 
     def forward(self, data, auxilary=None):
         assert self.last is bool(auxilary), (
@@ -88,15 +95,18 @@ class Encoder(nn.Module):
         channels = base_network_channels
         self.down, self.pre_quantize, self.quantize = [], [], []
         for i in range(n_enc):
+            assert channels % 2 == 0
+
             self.down.append(DownBlock(channels, n_down_per_enc))
-            self.pre_quantize.append(
-                PreQuantization(channels, last=(i==n_enc-1), n_up=n_down_per_enc)
-            )
             self.quantize.append(
-                Quantizer(num_embeddings=channels/2, embedding_dim=256, commitment_cost=7)
+                Quantizer(num_embeddings=int(channels/2), embedding_dim=256, commitment_cost=7)
             )
 
             channels *= 2 ** n_down_per_enc
+
+            self.pre_quantize.append(
+                PreQuantization(channels*2, last=(i==n_enc-1), n_up=n_down_per_enc)
+            )
 
 
     def forward(self, data):
@@ -116,13 +126,15 @@ class Encoder(nn.Module):
 
 class Decoder(nn.Module):
     def __init__(self, out_channels, base_network_channels, n_enc=3, n_up_per_enc=2):
-        super(Encoder, self).__init__()
+        super(Decoder, self).__init__()
 
         self.up = []
         channels = base_network_channels
         for i in range(n_enc):
+            assert channels % 2 == 0
+
             self.up.append(UpBlock(
-                out_channels=channels, aux_channels=(0 if i==n_enc-1 else channels/2),
+                out_channels=channels, aux_channels=(0 if i==n_enc-1 else channels//2),
                 n_up=n_up_per_enc
             ))
             channels *= 2 ** (n_enc * n_up_per_enc)
@@ -140,7 +152,7 @@ class Decoder(nn.Module):
         return out
 
 
-class FixupBlock(torch.nn.Module):
+class FixupResBlock(torch.nn.Module):
     # Adapted from:
     # https://github.com/hongyi-zhang/Fixup/blob/master/imagenet/models/fixup_resnet_imagenet.py#L20
 
@@ -149,12 +161,12 @@ class FixupBlock(torch.nn.Module):
     """
 
     def __init__(self, in_channels, out_channels, mode):
-        super(FixupBlock, self).__init__()
+        super(FixupResBlock, self).__init__()
 
         assert mode in ("down", "same", "up")
 
         self.bias1a, self.bias1b, self.bias2a, self.bias2b, self.scale = (
-            nn.Parameter(torch.zeros(1) for _ in range(5))
+            nn.Parameter(torch.zeros(1)) for _ in range(5)
         )
 
         self.activation = torch.nn.LeakyReLU(inplace=False)
@@ -239,9 +251,9 @@ class Quantizer(torch.nn.Module):
     FIXME: Remove either output one-hot(TODO: check actually one-hot) or dense encoding indices
     """
     def __init__(
-        self, num_embeddings, embedding_dim, commitment_cost, decay, epsilon=1e-5
+        self, num_embeddings : int, embedding_dim : int, commitment_cost : float, decay=0.99, epsilon=1e-5
     ):
-        super(VectorQuantizerEMA, self).__init__()
+        super(Quantizer, self).__init__()
 
         self._embedding_dim = embedding_dim
         self._num_embeddings = num_embeddings
@@ -258,8 +270,6 @@ class Quantizer(torch.nn.Module):
 
         self._decay = decay
         self._epsilon = epsilon
-
-        self.name = name
 
     def forward(self, inputs):
         inputs = inputs.permute(0, 2, 3, 4, 1)
@@ -334,7 +344,7 @@ class SubPixelConvolution3D(torch.nn.Module):
         )
 
         self.shuffle = PixelShuffle3D(
-            upscale_factor=upsample_factor, name="PixelShuffle3D"
+            upscale_factor=upsample_factor
         )
 
         self.nca = torch.nn.Sequential(
@@ -342,13 +352,10 @@ class SubPixelConvolution3D(torch.nn.Module):
             torch.nn.AvgPool3d(kernel_size=2, stride=1),
         )
 
-        self.name = name
-
     def forward(self, input):
-        with torch.autograd.profiler.record_function(self.name):
-            out = self.conv(input)
-            out = self.shuffle(out)
-            out = self.nca(out)
+        out = self.conv(input)
+        out = self.shuffle(out)
+        out = self.nca(out)
         return out
 
     def initialize_weights(self):
@@ -387,7 +394,6 @@ class PixelShuffle3D(torch.nn.Module):
         self.upscale_factor_cubed = upscale_factor ** 3
         self._shuffle_out = None
         self._shuffle_in = None
-        self.name = name
 
     def forward(self, input):
         shuffle_out = input.new()
