@@ -19,19 +19,29 @@ class VQVAE(pl.LightningModule):
 
         super(VQVAE, self).__init__()
 
-        self.encoder = Encoder(input_channels, base_network_channels, n_bottleneck_blocks, n_blocks_per_bottleneck)
-        self.decoder = Decoder(input_channels, base_network_channels, n_bottleneck_blocks, n_blocks_per_bottleneck)
+        self.encoder = Encoder(
+            in_channels=input_channels,
+            base_network_channels=base_network_channels,
+            n_enc=n_bottleneck_blocks,
+            n_down_per_enc=n_blocks_per_bottleneck
+        )
+        self.decoder = Decoder(
+            out_channels=input_channels,
+            base_network_channels=base_network_channels,
+            n_enc=n_bottleneck_blocks,
+            n_up_per_enc=n_blocks_per_bottleneck
+        )
 
 
     def forward(self, data):
-        _, quantizations, _, _, _ = zip(*self.encode(inputs)) # list transpose of encoder outputs
+        _, quantizations, _, _, _ = zip(*self.encode(data)) # list transpose of encoder outputs
         decoded = self.decode(quantizations)
 
     def encode(self, data):
-        return self.Encoder(data)
+        return self.encoder(data)
 
     def decode(self, quantizations):
-        return self.Decoder(data)
+        return self.decoder(data)
 
 
 class DownBlock(nn.Module):
@@ -49,13 +59,19 @@ class DownBlock(nn.Module):
 class UpBlock(nn.Module):
     def __init__(self, out_channels, aux_channels=0, n_up=2):
         super(UpBlock, self).__init__()
-        
-        # Some slight schenanigans required for the first layer because of possible concat beforehand
-        self.layers = []
+
+        # Some slight shenanigans required for the first layer because of possible concat beforehand
+        layers = []
         for i in range(n_up):
-            assert out_channels % 2**(i+1) == 0
-            FixupResBlock(out_channels//(2**i) + (aux_channels if i == n_up-1 else 0),
-                          out_channels//(2**(i+1)), mode='up')
+            # assert out_channels % 2**(i+1) == 0
+
+            layers.append(FixupResBlock(
+                out_channels*(2**(i+1)) + (aux_channels if i == n_up-1 else 0),
+                out_channels*(2**i),
+                mode='up'
+            ))
+
+        self.layers = nn.Sequential(*reversed(layers))
 
 
     def forward(self, data):
@@ -63,21 +79,17 @@ class UpBlock(nn.Module):
 
 
 class PreQuantization(nn.Module):
-
-    def __init__(self, in_channels, last=False, n_up=2):
+    def __init__(self, in_channels, aux_channels=0, n_up=2):
         super(PreQuantization, self).__init__()
-        self.last = last
+        self.has_aux = aux_channels != 0
 
-        if not last:
-            self.upsample = UpBlock(in_channels, n_up=n_up)
+        if aux_channels != 0:
+            self.upsample = UpBlock(aux_channels, n_up=n_up)
 
-        pre_q_channels = in_channels//(2**n_up)
-        self.pre_q = FixupResBlock(pre_q_channels, pre_q_channels, mode='same')
+        self.pre_q = FixupResBlock(in_channels + aux_channels, in_channels, mode='same')
 
     def forward(self, data, auxilary=None):
-        assert self.last is bool(auxilary), (
-            "The last layer shouldn't be conditioned on anything!"
-        )
+        assert self.has_aux is (auxilary is not None)
 
         if not self.last:
             data = torch.cat([data, self.upsample(auxilary)], dim=1)
@@ -98,24 +110,29 @@ class Encoder(nn.Module):
             assert channels % 2 == 0
 
             self.down.append(DownBlock(channels, n_down_per_enc))
-            self.quantize.append(
-                Quantizer(num_embeddings=int(channels/2), embedding_dim=256, commitment_cost=7)
-            )
+
 
             channels *= 2 ** n_down_per_enc
 
+            assert channels % 8 == 0
+            aux_channels = channels // 8
             self.pre_quantize.append(
-                PreQuantization(channels*2, last=(i==n_enc-1), n_up=n_down_per_enc)
+                PreQuantization(channels, aux_channels, n_up=n_down_per_enc)
+            )
+            self.quantize.append(
+                Quantizer(num_embeddings=aux_channels, embedding_dim=256, commitment_cost=7)
             )
 
 
     def forward(self, data):
-        down = data
+        preprocessed = self.parse_input(data)
+
+        down = preprocessed
         downsampled = [(down := downblock(down)) for downblock in self.down]
 
         aux = None
         quantizations = []
-        for down, pre_quantize, quantize in reversed(zip(downsampled, self.pre_quantize, self.quantize)):
+        for down, pre_quantize, quantize in reversed(list(zip(downsampled, self.pre_quantize, self.quantize))):
             quantization = quantize(pre_quantize(down, aux))
             quantizations.append(quantization)
 
@@ -204,7 +221,7 @@ class FixupResBlock(torch.nn.Module):
 
 
     def forward(self, input):
-        out = self.branch_conv(input + self.bias1a)
+        out = self.branch_conv1(input + self.bias1a)
         out = self.nca(self.activation(out + self.bias1b))
 
         out = self.branch_conv2(out + self.bias2a)
