@@ -153,7 +153,7 @@ class Decoder(nn.Module):
             num_embeddings = before_channels // 8
 
             self.up.append(UpBlock(
-                in_channels=before_channels + (num_embeddings if i != n_enc-1 else 0),
+                in_channels=num_embeddings + (before_channels if i != n_enc-1 else 0),
                 out_channels=after_channels,
                 n_up=n_up_per_enc
             ))
