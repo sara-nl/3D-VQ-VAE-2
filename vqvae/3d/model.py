@@ -50,7 +50,7 @@ class DownBlock(nn.Module):
         super(DownBlock, self).__init__()
 
         self.layers = nn.Sequential(*(
-            FixupResBlock(in_channels*i, in_channels*(i+1), mode='down') for i in range(1, n_down+1)
+            FixupResBlock(in_channels*2**i, in_channels*2**(i+1), mode='down') for i in range(n_down)
         ))
 
     def forward(self, data):
@@ -78,10 +78,10 @@ class UpBlock(nn.Module):
 class PreQuantization(nn.Module):
     def __init__(self, in_channels, out_channels, n_up=2):
         super(PreQuantization, self).__init__()
-        self.has_aux = (aux_channels := in_channels - out_channels * 8) != 0
+        self.has_aux = in_channels - out_channels * 8 != 0
 
         if self.has_aux:
-            self.upsample = UpBlock(aux_channels * 2 ** n_up, out_channels, n_up=n_up)
+            self.upsample = UpBlock(out_channels * 2 ** n_up, out_channels, n_up=n_up)
 
         self.pre_q = FixupResBlock(in_channels, out_channels, mode='same')
 
