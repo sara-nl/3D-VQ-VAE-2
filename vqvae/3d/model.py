@@ -14,7 +14,7 @@ class VQVAE(pl.LightningModule):
         input_channels=1,
         base_network_channels=4,
         n_bottleneck_blocks=3,
-        n_blocks_per_bottleneck=1
+        n_blocks_per_bottleneck=2
     ):
 
         super(VQVAE, self).__init__()
@@ -133,11 +133,11 @@ class Encoder(nn.Module):
         quantizations = []
         for down, pre_quantize, quantize in reversed(list(zip(downsampled, self.pre_quantize, self.quantize))):
             quantization = quantize(pre_quantize(down, aux))
-            quantizations.insert(0, quantization)
+            quantizations.append(quantization)
 
             _, aux, _, _, _ = quantization
 
-        return quantizations
+        return reversed(quantizations)
 
 
 class Decoder(nn.Module):
@@ -152,15 +152,31 @@ class Decoder(nn.Module):
             assert before_channels % 8 == 0
             num_embeddings = before_channels // 8
 
-            self.up.append(UpBlock(
-                in_channels=num_embeddings + (before_channels if i != n_enc-1 else 0),
-                out_channels=after_channels,
-                n_up=n_up_per_enc
-            ))
+            in_channels = num_embeddings + (before_channels if i != n_enc-1 else 0)
+
+            if i == 0:
+                if n_up_per_enc > 1:
+                    self.up.append(nn.Sequential(
+                        UpBlock(
+                            in_channels=in_channels,
+                            out_channels=base_network_channels,
+                            n_up=n_up_per_enc-1
+                        ),
+                        SubPixelConvolution3D(base_network_channels, out_channels)
+                    ))
+                else:
+                    self.up.append(SubPixelConvolution3D(in_channels, out_channels))
+            else:
+                self.up.append(
+                    UpBlock(
+                        in_channels=in_channels,
+                        out_channels=after_channels,
+                        n_up=n_up_per_enc
+                    )
+                )
 
             after_channels = before_channels
 
-        self.subpixel = SubPixelConvolution3D(base_network_channels, out_channels)
 
     def forward(self, quantizations):
         for i, (quantization, up) in enumerate(reversed(list(zip(quantizations, self.up)))):
@@ -168,9 +184,7 @@ class Decoder(nn.Module):
 
             prev_up = up(up_input)
 
-        out = self.subpixel(prev_up)
-
-        return out
+        return prev_up
 
 
 class FixupResBlock(torch.nn.Module):
