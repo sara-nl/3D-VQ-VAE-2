@@ -42,7 +42,7 @@ class VQVAE(pl.LightningModule):
         return self.encoder(data)
 
     def decode(self, quantizations):
-        return self.decoder(data)
+        return self.decoder(quantizations)
 
 
 class DownBlock(nn.Module):
@@ -78,10 +78,10 @@ class UpBlock(nn.Module):
 class PreQuantization(nn.Module):
     def __init__(self, in_channels, out_channels, n_up=2):
         super(PreQuantization, self).__init__()
-        self.has_aux = (aux_channels := out_channels * 8) != in_channels
+        self.has_aux = (aux_channels := in_channels - out_channels * 8) != 0
 
         if self.has_aux:
-            self.upsample = UpBlock(aux_channels, out_channels, n_up=n_up)
+            self.upsample = UpBlock(aux_channels * 2 ** n_up, out_channels, n_up=n_up)
 
         self.pre_q = FixupResBlock(in_channels, out_channels, mode='same')
 
@@ -133,7 +133,7 @@ class Encoder(nn.Module):
         quantizations = []
         for down, pre_quantize, quantize in reversed(list(zip(downsampled, self.pre_quantize, self.quantize))):
             quantization = quantize(pre_quantize(down, aux))
-            quantizations.append(quantization)
+            quantizations.insert(0, quantization)
 
             _, aux, _, _, _ = quantization
 
@@ -163,8 +163,8 @@ class Decoder(nn.Module):
         self.subpixel = SubPixelConvolution3D(base_network_channels, out_channels)
 
     def forward(self, quantizations):
-        for i, (quantization, up) in enumerate(reversed(zip(quantizations, self.up))):
-            up_input = quantization if i != 0 else torch.cat([quantization, prev_up], dim=1)
+        for i, (quantization, up) in enumerate(reversed(list(zip(quantizations, self.up)))):
+            up_input = quantization if i == 0 else torch.cat([quantization, prev_up], dim=1)
 
             prev_up = up(up_input)
 
@@ -419,8 +419,10 @@ class PixelShuffle3D(torch.nn.Module):
     def forward(self, input):
         shuffle_out = input.new()
 
-        batch_size, cubed_channels, in_depth, in_heigt, in_width = input.size()
-        channels = cubed_channels / self.upscale_factor_cubed
+        batch_size, cubed_channels, in_depth, in_height, in_width = input.size()
+
+        assert cubed_channels % self.upscale_factor_cubed == 0
+        channels = cubed_channels // self.upscale_factor_cubed
 
         input_view = input.view(
             batch_size,
