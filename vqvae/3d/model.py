@@ -109,15 +109,15 @@ class Encoder(nn.Module):
             self.down.append(DownBlock(before_channels, n_down_per_enc))
 
             assert after_channels % 8 == 0
-            num_embeddings = after_channels // 8
+            embedding_dim = after_channels // 8
 
             self.pre_quantize.append(PreQuantization(
-                in_channels=after_channels + (num_embeddings if i != n_enc-1 else 0),
-                out_channels=num_embeddings,
+                in_channels=after_channels + (embedding_dim if i != n_enc-1 else 0),
+                out_channels=embedding_dim,
                 n_up=n_down_per_enc
             ))
             self.quantize.append(
-                Quantizer(num_embeddings=num_embeddings, embedding_dim=256, commitment_cost=7)
+                Quantizer(num_embeddings=256, embedding_dim=embedding_dim, commitment_cost=7)
             )
 
             before_channels = after_channels
@@ -150,9 +150,9 @@ class Decoder(nn.Module):
             before_channels = after_channels * 2 ** n_up_per_enc
 
             assert before_channels % 8 == 0
-            num_embeddings = before_channels // 8
+            embedding_dim = before_channels // 8
 
-            in_channels = num_embeddings + (before_channels if i != n_enc-1 else 0)
+            in_channels = embedding_dim + (before_channels if i != n_enc-1 else 0)
 
             if i == 0:
                 if n_up_per_enc > 1:
