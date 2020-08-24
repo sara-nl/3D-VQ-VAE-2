@@ -34,7 +34,7 @@ module load cuDNN
 echo "Activating conda env $CONDA_ENV"
 source activate "$CONDA_ENV"
 
-SCRIPTPATH="$ROOT_DIR/train_vqvae.py"
+SCRIPTPATH="$ROOT_DIR/vqvae/2d/train_vqvae.py"
 
 INDIR="$TMPDIR"
 mkdir -p "$INDIR"
