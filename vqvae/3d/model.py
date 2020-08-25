@@ -1,6 +1,7 @@
 from itertools import zip_longest
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 import pytorch_lightning as pl
 
@@ -14,7 +15,7 @@ class VQVAE(pl.LightningModule):
         input_channels=1,
         base_network_channels=4,
         n_bottleneck_blocks=3,
-        n_blocks_per_bottleneck=2
+        n_blocks_per_bottleneck=1
     ):
 
         super(VQVAE, self).__init__()
@@ -43,6 +44,21 @@ class VQVAE(pl.LightningModule):
 
     def decode(self, quantizations):
         return self.decoder(quantizations)
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
+        return optimizer
+    
+    def training_step(self, batch, batch_idx):
+        x, _ = batch
+        recon = self(x)
+        loss = F.mse_loss(x, recon)
+        result = pl.TrainResult(loss)
+        # Add logging to progress bar (note that efreshing the progress bar too frequently
+        # in Jupyter notebooks or Colab may freeze your UI)
+        result.log('train_loss', loss, prog_bar=True)
+        return result
+
 
 
 class DownBlock(nn.Module):

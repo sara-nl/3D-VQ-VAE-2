@@ -1,6 +1,11 @@
 # vq-vae-2-pytorch
 Implementation of Generating Diverse High-Fidelity Images with VQ-VAE-2 in PyTorch
 
+## Installation
+Install dependencies with conda using `conda env create -f environment_pytorch1.6.yml`
+Activate env with `conda activate pytorch1.6`.  
+After this, install the repo using `pip install .` in the root dir.
+
 ## Update
 
 * 2020-06-01
