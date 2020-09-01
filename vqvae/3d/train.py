@@ -11,22 +11,36 @@ from model import VQVAE
 from _utils import CTScanDataset
 
 def main(args):
-    threshold_value = 3000
+    key, min_val, max_val = 'img', -1000, 3000
+
     transform = transforms.Compose([
-        transforms.AddChanneld(keys=['img']),
-        transforms.Spacingd(keys=['img'], pixdim=(1,1,3)),
-        transforms.SpatialPadd(keys=['img'], spatial_size=(512, 512, 128)),
-        transforms.RandSpatialCropd(keys=['img'], roi_size=(256, 256, 128), random_size=False),
-        transforms.ThresholdIntensityd(keys=['img'], threshold=threshold_value, cval=threshold_value),
-        transforms.ToTensord(keys=['img'])
+        transforms.AddChannel(),
+        transforms.ThresholdIntensity(threshold=max_val, cval=max_val, above=False),
+        transforms.SpatialPad(spatial_size=(512, 512, 128), mode='edge'),
+        transforms.ScaleIntensity(minv=None, maxv=None, factor=(-1 - 1/min_val)),
+        transforms.RandSpatialCrop(roi_size=(512, 512, 128), random_size=False),
+        # transforms.Resize(spatial_size=(256, 256, 128)),
+        transforms.ToTensor()
     ])
 
-    dataset = CTScanDataset(args.dataset_path, transform=transform)
-    train_loader = DataLoader(dataset, batch_size=args.batch_size, num_workers=4)
+    dataset = CTScanDataset(args.dataset_path, transform=transform, spacing=(0.976, 0.976, 3))
+    train_loader = DataLoader(dataset, batch_size=args.batch_size, num_workers=6, pin_memory=True)
 
     model = VQVAE()
 
-    trainer = pl.Trainer(gpus=1, fast_dev_run=True)
+    trainer = pl.Trainer(
+        gpus=4,
+        auto_select_gpus=True,
+        distributed_backend='ddp',
+        benchmark=True,
+
+        max_epochs=200,
+        terminate_on_nan=True,
+
+        profiler=None,
+        row_log_interval=100,
+        log_save_interval=1000,
+    )
     trainer.fit(model, train_loader)
 
 

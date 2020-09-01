@@ -1,5 +1,6 @@
 name: pytorch1.6
 channels:
+  - simpleitk
   - conda-forge
   - pytorch
   - defaults
@@ -107,16 +108,10 @@ dependencies:
   - zstd=1.4.4=h0b5b093_3
   - pytorch=1.6.0=py3.8_cuda10.1.243_cudnn7.6.3_0
   - torchvision=0.7.0=py38_cu101
+  - simpleitk=2.0rc3=py38hf484d3e_0
   - pip:
     - hpc-generative-models==0.0.1
-    - itk==5.1.1
-    - itk-core==5.1.1
-    - itk-filtering==5.1.1
-    - itk-io==5.1.1
-    - itk-numerics==5.1.1
-    - itk-registration==5.1.1
-    - itk-segmentation==5.1.1
-    - monai==0.2.0+111.g3c5b249
+    - nibabel==3.1.1
     - pytorch-lightning==0.9.0
     - torch==1.6.0
 prefix: /home/robertsc/.conda/envs/pytorch1.6

@@ -1,5 +1,6 @@
 from itertools import zip_longest
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -9,30 +10,34 @@ import pytorch_lightning as pl
 This is largely a refactor of https://github.com/danieltudosiu/nmpevqvae
 """
 
+
 class VQVAE(pl.LightningModule):
     def __init__(
         self,
         input_channels=1,
         base_network_channels=4,
         n_bottleneck_blocks=3,
-        n_blocks_per_bottleneck=1
+        n_blocks_per_bottleneck=2
     ):
 
         super(VQVAE, self).__init__()
+
+        num_layers = (3 * n_bottleneck_blocks - 1) * n_blocks_per_bottleneck + 2 * n_bottleneck_blocks
 
         self.encoder = Encoder(
             in_channels=input_channels,
             base_network_channels=base_network_channels,
             n_enc=n_bottleneck_blocks,
-            n_down_per_enc=n_blocks_per_bottleneck
+            n_down_per_enc=n_blocks_per_bottleneck,
         )
         self.decoder = Decoder(
             out_channels=input_channels,
             base_network_channels=base_network_channels,
             n_enc=n_bottleneck_blocks,
-            n_up_per_enc=n_blocks_per_bottleneck
+            n_up_per_enc=n_blocks_per_bottleneck,
         )
 
+        self.apply(lambda x: x.initialize_weights(num_layers=num_layers) if isinstance(x, FixupResBlock) else None)
 
     def forward(self, data):
         _, quantizations, _, _, _ = zip(*self.encode(data)) # list transpose of encoder outputs
@@ -48,17 +53,15 @@ class VQVAE(pl.LightningModule):
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
         return optimizer
-    
+
     def training_step(self, batch, batch_idx):
         x, _ = batch
         recon = self(x)
         loss = F.mse_loss(x, recon)
-        result = pl.TrainResult(loss)
-        # Add logging to progress bar (note that efreshing the progress bar too frequently
-        # in Jupyter notebooks or Colab may freeze your UI)
+        result = pl.TrainResult(minimize=loss)
         result.log('train_loss', loss, prog_bar=True)
-        return result
 
+        return result
 
 
 class DownBlock(nn.Module):
@@ -402,6 +405,8 @@ class SubPixelConvolution3D(torch.nn.Module):
             torch.nn.ConstantPad3d(padding=(1, 0, 1, 0, 1, 0), value=0),
             torch.nn.AvgPool3d(kernel_size=2, stride=1),
         )
+
+        self.initialize_weights()
 
     def forward(self, input):
         out = self.conv(input)

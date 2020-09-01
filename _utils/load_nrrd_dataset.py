@@ -3,64 +3,90 @@ from itertools import chain, tee
 from random import shuffle, sample
 from pathlib import Path
 from copy import copy
+from typing import Union, Sequence, Tuple
 
 import nrrd
 import numpy as np
 from monai import transforms
-
-
-try:
-    import torch
-    from torch.utils.data import Sampler, Dataset
-except ImportError:
-    print("PyTorch not found, some functions will not be available")
+import torch
+from torch.utils.data import Sampler, Dataset
 
 
 
 class CTScanDataset(Dataset):
     '''Warning: file (name) ordering is not preserved'''
-    def __init__(self, root, transform=None, size=(512, 512, None), ext='.nrrd'):
+    def __init__(
+        self,
+        root: str,
+        transform=None,
+        size: Tuple[Union[int, None], Union[int, None], Union[int, None]] = (512, 512, None),
+        spacing: Union[Tuple[float, float, float], None] = None,
+        ext: str = '.nrrd'
+    ):
+
         '''size: any scan not compatible with the specified size will be discarded.
         Insert None for a dim that can be any size'''
-        
+
         root_path = Path(root)
 
         self.transform = transform
 
         scans = np.array(list(map(str, Path(root).glob(f'**/*{ext}'))))
-        scan_sizes = np.array([nrrd.read_header(str(scan_path))['sizes']
-                               for scan_path in scans])
-        
-        faulty_idx = np.unique(np.where(~(scan_sizes == size).T[np.where(size)[0]])[1])
-        if len(faulty_idx):
-            print(f"Found {len(faulty_idx)} scans where their size doesn't match the input size {size}. Ignoring scans {scans[faulty_idx]}")
+        scan_sizes = np.array([nrrd.read_header(str(scan_path))['sizes'] for scan_path in scans])
+        # I know we're reading the scans thrice, but I get some strange Nones when I try
+        # to do it in one go.
+        # types = np.array([nrrd.read_header(str(scan_path))['type'] for scan_path in scans])
+
+        if spacing is not None:
+            spacings = np.array([
+                nrrd.read_header(str(scan_path))['space directions'][np.diag_indices(3)]
+                for scan_path in scans
+            ])
+            faulty_spacing = np.where(~np.isclose(spacings, spacing, atol=1e-3).all(axis=1))[0]
+        else:
+            faulty_spacing = []
+
+        if len(faulty_spacing):
+            print(f"Found {len(faulty_spacing)} scans where their spacing doesn't match the input spacing {spacing}. Ignoring scans {scans[faulty_spacing]}")
+
+        # faulty_types = np.where(types != 'short')[0]
+        # if len(faulty_types):
+        #     print(f"Found {len(faulty_types)} scans where their is not 'short'. Ignoring scans {scans[faulty_types]}")
+
+        faulty_sizes = np.unique(np.where(~(scan_sizes == size).T[np.where(size)[0]])[1])
+        if len(faulty_sizes):
+            print(f"Found {len(faulty_sizes)} scans where their size doesn't match the input size {size}. Ignoring scans {scans[faulty_sizes]}")
+
+        faulty_idx = np.unique(np.append(faulty_sizes, faulty_spacing))
 
         self.scans = np.delete(scans, faulty_idx)
         self.scan_sizes = np.delete(scan_sizes, faulty_idx, axis=0)
 
-        self.reader = transforms.LoadImage()
-
-    def __len__(self):
+    def __len__(self) -> int:
         return self.scans.shape[0]
 
     @lru_cache(maxsize=1)
-    def get_scan(self, scan_index):
-        data, metadata = self.reader(self.scans[scan_index])
-        return {'img': data, 'img_meta_dict': metadata}
+    def get_scan(self, scan_index: int) -> Tuple[np.array, dict]:
+        data, metadata = nrrd.read(self.scans[scan_index])
+        return data.astype(np.float32), metadata
 
-    def __getitem__(self, index):
-        scan = self.get_scan(index)
-        return (scan if self.transform is None else self.transform(scan))['img'], -1
+    def __getitem__(self, index: int) -> Tuple[np.array, int]:
+        data, metadata = self.get_scan(index)
+
+        if self.transform is not None:
+            data = self.transform(data)
+
+        return data, -1
 
 
 class CTSliceDataset(CTScanDataset):
     def __init__(self, root, transform=None, size=(512, 512, None), ext='.nrrd'):
         '''size: any scan not compatible with the specified size will be discarded.
         Insert None for a dim that can be any size'''
-        
+
         super(CTSliceDataset, self).__init__()
 
-        self.scan_heights = self.scan_sizes.T[-1]
+        self.scan_heights = self.scan_sizes.T[1]
 
         self.cumsum = np.cumsum(np.insert(self.scan_heights, 0, 0))
         num_slices = self.cumsum[-1]
@@ -68,13 +94,13 @@ class CTSliceDataset(CTScanDataset):
         self.idx = np.empty((num_slices,), dtype=np.int)
         for i, (start, finish) in enumerate(pairwise(self.cumsum)):
             self.idx[start:finish] = i
-        
+
         self.num_slices = num_slices
 
     def __len__(self):
         return self.num_slices
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: int) -> Tuple[np.array, int]:
         '''returns:
         - Scan ('img')
         - -1 ('target')
@@ -82,9 +108,13 @@ class CTSliceDataset(CTScanDataset):
         scan_index = self.idx[index]
         cumsum_index = self.cumsum[scan_index]
 
-        scan, metadata = self.get_scan(scan_index)['img'][...,index - cumsum_index]
+        scan, metadata = self.get_scan(scan_index)
+        slice_ = scan[...,index - cumsum_index]
 
-        return scan if self.transform is None else self.transform(scan), -1
+        if self.transform is not None:
+            slice_ = self.transform(slice_)
+
+        return slice_, -1
 
 
 class SliceSampler(Sampler):
@@ -96,7 +126,7 @@ class SliceSampler(Sampler):
       - 'intra' means shuffling within scans, so the slice order itself is shuffled every iteration
       - 'both' means both 'inter' and 'intra' (default)
     '''
-    def __init__(self, data_source: CTSliceDataset, mode='both'):
+    def __init__(self, data_source : CTSliceDataset, mode='both'):
         if not mode in (mode_options := ('none', 'inter', 'intra', 'both')):
             raise ValueError(f"Mode needs to be in {mode_options}, found {mode}")
 
