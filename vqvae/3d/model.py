@@ -57,7 +57,7 @@ class VQVAE(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x, _ = batch
         recon = self(x)
-        loss = F.mse_loss(x, recon)
+        loss = F.mse_loss(input=recon, target=x)
         result = pl.TrainResult(minimize=loss)
         result.log('train_loss', loss, prog_bar=True)
 
@@ -219,9 +219,10 @@ class FixupResBlock(torch.nn.Module):
 
         assert mode in ("down", "same", "up")
 
-        self.bias1a, self.bias1b, self.bias2a, self.bias2b, self.scale = (
-            nn.Parameter(torch.zeros(1)) for _ in range(5)
+        self.bias1a, self.bias1b, self.bias2a, self.bias2b = (
+            nn.Parameter(torch.zeros(1)) for _ in range(4)
         )
+        self.scale = nn.Parameter(torch.ones(1))
 
         self.activation = torch.nn.LeakyReLU()
 
@@ -385,7 +386,7 @@ class Quantizer(torch.nn.Module):
 
 
 class SubPixelConvolution3D(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, upsample_factor=2):
+    def __init__(self, in_channels, out_channels, upsample_factor=2, avgpool_stride=1):
         super(SubPixelConvolution3D, self).__init__()
         assert upsample_factor == 2
         self.upsample_factor = upsample_factor
@@ -403,7 +404,7 @@ class SubPixelConvolution3D(torch.nn.Module):
 
         self.nca = torch.nn.Sequential(
             torch.nn.ConstantPad3d(padding=(1, 0, 1, 0, 1, 0), value=0),
-            torch.nn.AvgPool3d(kernel_size=2, stride=1),
+            torch.nn.AvgPool3d(kernel_size=2, stride=avgpool_stride),
         )
 
         self.initialize_weights()

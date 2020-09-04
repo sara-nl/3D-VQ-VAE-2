@@ -16,8 +16,10 @@ def main(args):
     transform = transforms.Compose([
         transforms.AddChannel(),
         transforms.ThresholdIntensity(threshold=max_val, cval=max_val, above=False),
-        transforms.SpatialPad(spatial_size=(512, 512, 128), mode='edge'),
+        transforms.ThresholdIntensity(threshold=min_val, cval=min_val, above=True),
         transforms.ScaleIntensity(minv=None, maxv=None, factor=(-1 - 1/min_val)),
+        transforms.ShiftIntensity(offset=1),
+        transforms.SpatialPad(spatial_size=(512, 512, 128), mode='constant'),
         transforms.RandSpatialCrop(roi_size=(512, 512, 128), random_size=False),
         # transforms.Resize(spatial_size=(256, 256, 128)),
         transforms.ToTensor()
