@@ -1,3 +1,7 @@
+"""
+This is largely a refactor of https://github.com/danieltudosiu/nmpevqvae
+"""
+
 from itertools import zip_longest
 
 import numpy as np
@@ -6,10 +10,7 @@ import torch.nn.functional as F
 from torch import nn
 import pytorch_lightning as pl
 
-"""
-This is largely a refactor of https://github.com/danieltudosiu/nmpevqvae
-"""
-
+from metrics.ssim import ssim3D
 
 class VQVAE(pl.LightningModule):
     def __init__(
@@ -60,6 +61,17 @@ class VQVAE(pl.LightningModule):
         loss = F.mse_loss(input=recon, target=x)
         result = pl.TrainResult(minimize=loss)
         result.log('train_loss', loss, prog_bar=True)
+
+        return result
+
+    def validation_step(self, batch, batch_idx):
+        x, _ = batch
+        recon = self(x)
+        mse_loss = F.mse_loss(input=recon, target=x)
+        ssim = ssim3D(recon, x)
+
+        result = pl.EvalResult()
+        result.log('val_loss', mse_loss)
 
         return result
 
@@ -175,13 +187,15 @@ class Decoder(nn.Module):
 
             if i == 0:
                 if n_up_per_enc > 1:
+                    cubed_out = out_channels * 2 ** 3
                     self.up.append(nn.Sequential(
                         UpBlock(
                             in_channels=in_channels,
-                            out_channels=base_network_channels,
+                            out_channels=cubed_out,
                             n_up=n_up_per_enc-1
                         ),
-                        SubPixelConvolution3D(base_network_channels, out_channels)
+                        UpBlock(in_channels=cubed_out, out_channels=cubed_out, n_up=1),
+                        SubPixelConvolution3D(cubed_out, out_channels, avgpool_stride=2)
                     ))
                 else:
                     self.up.append(SubPixelConvolution3D(in_channels, out_channels))
@@ -488,7 +502,7 @@ class PixelShuffle3D(torch.nn.Module):
         out_height = in_height * self.upscale_factor
         out_width = in_width * self.upscale_factor
 
-        output = shuffle_out.view(
+        output = shuffle_out.reshape(
             batch_size, channels, out_depth, out_height, out_width
         )
 
