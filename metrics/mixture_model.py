@@ -9,15 +9,12 @@ from torch.distributions.mixture_same_family import MixtureSameFamily
 
 class Logistic(dist.TransformedDistribution):
     def __init__(self, loc: torch.Tensor, scale: torch.Tensor):
-        base_distribution = dist.Uniform(0, 1)
+        self.loc, self.scale = dist.utils.broadcast_all(loc, scale)
+
+        base_distribution = dist.Uniform(torch.Tensor([0]).to(loc.device), torch.Tensor([1]).to(loc.device)).expand(self.loc.shape)
         transforms = [dist.SigmoidTransform().inv, dist.AffineTransform(loc=loc, scale=scale)]
 
         super(Logistic, self).__init__(base_distribution, transforms)
-
-    @cached_property
-    def batch_shape(self):
-        return self.log_prob(torch.Tensor([0])).shape
-
 
 
 def mixture_nll_loss(
@@ -38,7 +35,7 @@ def mixture_nll_loss(
     # Checking correct shape of inputs and permuting to have mixture component dim last
     num_dims = len(mixture_comp_logits.shape)
     assert num_dims >= 2
-    axes = (0, *range(num_dims-2, num_dims), 1)
+    axes = (0, *range(2, num_dims), 1)
 
     _, channel, *_ = mixture_comp_logits.shape
     mixture_comp_logits = mixture_comp_logits.permute(axes)

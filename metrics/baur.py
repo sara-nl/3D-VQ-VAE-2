@@ -5,7 +5,7 @@ import torch.nn as nn
 
 class BaurLoss3D(object):
     def __init__(self, lambda_reconstruction=1):
-        super(BaurLoss).__init__()
+        super(BaurLoss3D).__init__()
 
         self.lambda_reconstruction = lambda_reconstruction
         self.lambda_gdl = 0
@@ -64,21 +64,21 @@ class BaurLoss3D(object):
             device=image.device,
             dtype=dz.dtype,
         )
-        dz = cat([dz, dzz], 2)
-        dz = reshape(dz, input_shape)
+        dz = torch.cat([dz, dzz], 2)
+        dz = torch.reshape(dz, input_shape)
 
         dyz = torch.zeros(
             (batch_size, features, depth, 1, width), device=image.device, dtype=dy.dtype
         )
-        dy = cat([dy, dyz], 3)
-        dy = reshape(dy, input_shape)
+        dy = torch.cat([dy, dyz], 3)
+        dy = torch.reshape(dy, input_shape)
 
         dxz = torch.zeros(
             (batch_size, features, depth, height, 1),
             device=image.device,
             dtype=dx.dtype,
         )
-        dx = cat([dx, dxz], 4)
-        dx = reshape(dx, input_shape)
+        dx = torch.cat([dx, dxz], 4)
+        dx = torch.reshape(dx, input_shape)
 
         return dx, dy, dz
