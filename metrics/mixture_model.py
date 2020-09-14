@@ -11,7 +11,9 @@ class Logistic(dist.TransformedDistribution):
     def __init__(self, loc: torch.Tensor, scale: torch.Tensor):
         self.loc, self.scale = dist.utils.broadcast_all(loc, scale)
 
-        base_distribution = dist.Uniform(torch.Tensor([0]).to(loc.device), torch.Tensor([1]).to(loc.device)).expand(self.loc.shape)
+        zero, one = torch.Tensor([0, 1]).type_as(loc)
+
+        base_distribution = dist.Uniform(zero, one).expand(self.loc.shape)
         transforms = [dist.SigmoidTransform().inv, dist.AffineTransform(loc=loc, scale=scale)]
 
         super(Logistic, self).__init__(base_distribution, transforms)
@@ -71,6 +73,6 @@ if __name__ == '__main__':
     scaled = scales.exp()
 
     loss = mixture_nll_loss(test_in, Logistic, n_mix, mix, loc=locs, scale=scales)
-
+    print(loss)
 
 
