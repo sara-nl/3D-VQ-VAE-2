@@ -213,11 +213,10 @@ class Decoder(nn.Module):
 
     def forward(self, quantizations):
         for i, (quantization, up) in enumerate(reversed(list(zip(quantizations, self.up)))):
-            up_input = quantization if i == 0 else torch.cat([quantization, prev_up], dim=1)
+            out = quantization if i == 0 else torch.cat([quantization, out], dim=1)
+            out = up(out)
 
-            prev_up = up(up_input)
-
-        return prev_up
+        return out
 
 
 class FixupResBlock(torch.nn.Module):

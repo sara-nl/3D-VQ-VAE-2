@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader, random_split
 from monai import transforms
 
 from model import VQVAE
-from _utils import CTScanDataset
+from utils import CTScanDataset
 
 
 class CTDataModule(pl.LightningDataModule):
