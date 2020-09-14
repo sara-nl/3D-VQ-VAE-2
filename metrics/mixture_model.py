@@ -14,7 +14,7 @@ class Logistic(dist.TransformedDistribution):
         zero, one = torch.Tensor([0, 1]).type_as(loc)
 
         base_distribution = dist.Uniform(zero, one).expand(self.loc.shape)
-        transforms = [dist.SigmoidTransform().inv, dist.AffineTransform(loc=loc, scale=scale)]
+        transforms = [dist.SigmoidTransform().inv, dist.AffineTransform(loc=self.loc, scale=self.scale)]
 
         super(Logistic, self).__init__(base_distribution, transforms)
 
