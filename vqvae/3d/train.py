@@ -12,7 +12,7 @@ from _utils import CTScanDataset
 
 
 class CTDataModule(pl.LightningDataModule):
-    def __init__(self, path, batch_size=64, train_frac=0.9, num_workers=6):
+    def __init__(self, path, batch_size=64, train_frac=0.5, num_workers=5):
         super().__init__()
         assert 0 <= train_frac <= 1
 
@@ -50,25 +50,26 @@ class CTDataModule(pl.LightningDataModule):
         self.val_dataset = val_split
 
     def train_dataloader(self):
-        return DataLoader(self.train_dataset, batch_size=self.batch_size, num_workers=self.num_workers, pin_memory=True, shuffle=True)
+        return DataLoader(self.train_dataset, batch_size=self.batch_size, num_workers=self.num_workers, pin_memory=True, shuffle=True, drop_last=True)
 
-    def val_dataloader(self):
-        return DataLoader(self.val_dataset, batch_size=self.batch_size, num_workers=self.num_workers, pin_memory=True, shuffle=False)
+    # def val_dataloader(self):
+    #     return DataLoader(self.val_dataset, batch_size=self.batch_size, num_workers=1, pin_memory=True, shuffle=False, drop_last=True)
 
 
 
 def main(args):
     datamodule = CTDataModule(path=args.dataset_path, batch_size=args.batch_size, num_workers=6)
 
-    model = VQVAE()
+    n_mix = 3
+    model = VQVAE(output_channels=n_mix*3)
 
     checkpoint_callback = pl.callbacks.model_checkpoint.ModelCheckpoint(save_last=True, save_top_k=5)
 
     trainer = pl.Trainer(
-        gpus=4,
+        gpus=1,
         auto_select_gpus=True,
-        distributed_backend='ddp',
-        benchmark=True,
+        # distributed_backend='ddp',
+        # benchmark=True,
 
         max_epochs=200,
         terminate_on_nan=True,
@@ -77,7 +78,7 @@ def main(args):
 
         checkpoint_callback=checkpoint_callback,
         row_log_interval=100,
-        val_check_interval=100,
+        # val_check_interval=100,
         log_save_interval=1000,
     )
     trainer.fit(model, datamodule)

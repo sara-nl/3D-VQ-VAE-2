@@ -11,11 +11,16 @@ from torch import nn
 import pytorch_lightning as pl
 
 from metrics.ssim import ssim3D
+from metrics.baur import BaurLoss3D
+from metrics.mixture_model import Logistic, mixture_nll_loss
+
+baur_loss_f = BaurLoss3D(lambda_reconstruction=1)
 
 class VQVAE(pl.LightningModule):
     def __init__(
         self,
         input_channels=1,
+        output_channels=1,
         base_network_channels=4,
         n_bottleneck_blocks=3,
         n_blocks_per_bottleneck=2
@@ -32,7 +37,7 @@ class VQVAE(pl.LightningModule):
             n_down_per_enc=n_blocks_per_bottleneck,
         )
         self.decoder = Decoder(
-            out_channels=input_channels,
+            out_channels=output_channels,
             base_network_channels=base_network_channels,
             n_enc=n_bottleneck_blocks,
             n_up_per_enc=n_blocks_per_bottleneck,
@@ -58,22 +63,41 @@ class VQVAE(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x, _ = batch
         recon = self(x)
-        loss = F.mse_loss(input=recon, target=x)
-        result = pl.TrainResult(minimize=loss)
-        result.log('train_loss', loss, prog_bar=True)
+
+        n_mix = 3   
+        pi_k, locs, scales = torch.split(recon, n_mix, dim=1)
+        nll_loss = mixture_nll_loss(x, Logistic, n_mix, pi_k, loc=locs, scale=scales.exp())
+        # mse_loss = F.mse_loss(input=recon, target=x)
+        # mse_loss = F.mse_loss(input=recon, target=x)
+        # ssim_loss = 1-ssim3D(recon, x)
+        result = pl.TrainResult(minimize=nll_loss)
+
+        # result.log('train_loss', ssim_loss, prog_bar=True)
+        # result.log('train_mse', mse_loss, prog_bar=True)
 
         return result
 
-    def validation_step(self, batch, batch_idx):
-        x, _ = batch
-        recon = self(x)
-        mse_loss = F.mse_loss(input=recon, target=x)
-        ssim = ssim3D(recon, x)
+    # def validation_step(self, batch, batch_idx):
+        # pass
+        # x, _ = batch
 
-        result = pl.EvalResult()
-        result.log('val_loss', mse_loss)
+        # quantization_losses, quantizations, *_ = zip(*self.encode(x))
+        # recon = self.decode(quantizations)
 
-        return result
+        # mse_loss = F.mse_loss(input=recon, target=x)
+        # ssim_loss = 1-ssim3D(recon, x)
+        # # baur_loss = baur_loss_f(
+        # #     recon=recon,
+        # #     target=x,
+        # #     quantization_losses=quantization_losses
+        # # )
+
+        # result = pl.EvalResult(checkpoint_on=ssim_loss)
+        # result.log('val_mse', mse_loss)
+        # result.log('val_loss', ssim_loss)
+        # # result.log('val_baur', baur_loss)
+
+        # return result
 
 
 class DownBlock(nn.Module):
@@ -177,6 +201,7 @@ class Decoder(nn.Module):
 
         self.up = nn.ModuleList()
         after_channels = base_network_channels
+
         for i in range(n_enc):
             before_channels = after_channels * 2 ** n_up_per_enc
 
@@ -185,31 +210,15 @@ class Decoder(nn.Module):
 
             in_channels = embedding_dim + (before_channels if i != n_enc-1 else 0)
 
-            if i == 0:
-                if n_up_per_enc > 1:
-                    cubed_out = out_channels * 2 ** 3
-                    self.up.append(nn.Sequential(
-                        UpBlock(
-                            in_channels=in_channels,
-                            out_channels=cubed_out,
-                            n_up=n_up_per_enc-1
-                        ),
-                        UpBlock(in_channels=cubed_out, out_channels=cubed_out, n_up=1),
-                        SubPixelConvolution3D(cubed_out, out_channels, avgpool_stride=2)
-                    ))
-                else:
-                    self.up.append(SubPixelConvolution3D(in_channels, out_channels))
-            else:
-                self.up.append(
-                    UpBlock(
-                        in_channels=in_channels,
-                        out_channels=after_channels,
-                        n_up=n_up_per_enc
-                    )
-                )
+            self.up.append(UpBlock(
+                in_channels=in_channels,
+                out_channels=after_channels,
+                n_up=n_up_per_enc
+            ))
 
             after_channels = before_channels
-
+        
+        self.out = FixupResBlock(base_network_channels, out_channels, mode='out')
 
     def forward(self, quantizations):
         for i, (quantization, up) in enumerate(reversed(list(zip(quantizations, self.up)))):
@@ -217,7 +226,9 @@ class Decoder(nn.Module):
 
             prev_up = up(up_input)
 
-        return prev_up
+        out = self.out(prev_up)
+
+        return out
 
 
 class FixupResBlock(torch.nn.Module):
@@ -228,31 +239,35 @@ class FixupResBlock(torch.nn.Module):
     FIXME: check wether the biases should be a single scalar or a vector
     """
 
-    def __init__(self, in_channels, out_channels, mode):
+    def __init__(self, in_channels, out_channels, mode, activation=nn.LeakyReLU):
         super(FixupResBlock, self).__init__()
 
-        assert mode in ("down", "same", "up")
+        assert mode in ("down", "same", "up", "out")
+        self.mode = mode
 
         self.bias1a, self.bias1b, self.bias2a, self.bias2b = (
             nn.Parameter(torch.zeros(1)) for _ in range(4)
         )
         self.scale = nn.Parameter(torch.ones(1))
 
-        self.activation = torch.nn.LeakyReLU()
+        self.activation = activation()
 
         if mode == 'down':
             conv = nn.Conv3d
-            kernel_size, stride = 3, 2
+            kernel_size, stride, padding = 3, 2, 1
         elif mode == 'same':
             conv = nn.Conv3d
-            kernel_size, stride = 3, 1
-        else: # mode == 'up'
+            kernel_size, stride, padding = 3, 1, 1
+        elif mode == 'up':
             conv = nn.ConvTranspose3d
-            kernel_size, stride = 4, 2
+            kernel_size, stride, padding = 4, 2, 1
+        else: # mode == 'out'
+            conv = nn.Conv3d
+            kernel_size, stride, padding = 1, 1, 0
 
         self.branch_conv1, self.skip_conv = (
             conv(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
-                 stride=stride, padding=1, bias=False)
+                 stride=stride, padding=padding, bias=False)
             for _ in range(2)
         )
 
@@ -260,27 +275,24 @@ class FixupResBlock(torch.nn.Module):
         self.branch_conv2 = torch.nn.Conv3d(
             in_channels=out_channels,
             out_channels=out_channels,
-            kernel_size=3,
+            kernel_size=3 if mode != 'out' else 1,
             stride=1,
-            padding=1,
+            padding=padding,
             bias=False,
-        )
-
-        self.nca = torch.nn.Sequential(
-            torch.nn.ConstantPad3d(padding=(1, 0, 1, 0, 1, 0), value=0),
-            torch.nn.AvgPool3d(kernel_size=2, stride=1),
         )
 
 
     def forward(self, input):
         out = self.branch_conv1(input + self.bias1a)
-        out = self.nca(self.activation(out + self.bias1b))
+        out = self.activation(out + self.bias1b)
 
         out = self.branch_conv2(out + self.bias2a)
         out = out * self.scale + self.bias2b
 
-        out += self.nca(self.skip_conv(input + self.bias1a))
-        out = self.activation(out)
+        out += self.skip_conv(input + self.bias1a)
+
+        if self.mode != 'out':
+            out = self.activation(out)
 
         return out
 
@@ -400,7 +412,7 @@ class Quantizer(torch.nn.Module):
 
 
 class SubPixelConvolution3D(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, upsample_factor=2, avgpool_stride=1):
+    def __init__(self, in_channels, out_channels, upsample_factor=2):
         super(SubPixelConvolution3D, self).__init__()
         assert upsample_factor == 2
         self.upsample_factor = upsample_factor
@@ -414,11 +426,6 @@ class SubPixelConvolution3D(torch.nn.Module):
 
         self.shuffle = PixelShuffle3D(
             upscale_factor=upsample_factor
-        )
-
-        self.nca = torch.nn.Sequential(
-            torch.nn.ConstantPad3d(padding=(1, 0, 1, 0, 1, 0), value=0),
-            torch.nn.AvgPool3d(kernel_size=2, stride=avgpool_stride),
         )
 
         self.initialize_weights()
