@@ -185,36 +185,26 @@ class Decoder(nn.Module):
 
             in_channels = embedding_dim + (before_channels if i != n_enc-1 else 0)
 
-            if i == 0:
-                if n_up_per_enc > 1:
-                    cubed_out = out_channels * 2 ** 3
-                    self.up.append(nn.Sequential(
-                        UpBlock(
-                            in_channels=in_channels,
-                            out_channels=cubed_out,
-                            n_up=n_up_per_enc-1
-                        ),
-                        UpBlock(in_channels=cubed_out, out_channels=cubed_out, n_up=1),
-                        SubPixelConvolution3D(cubed_out, out_channels, avgpool_stride=2)
-                    ))
-                else:
-                    self.up.append(SubPixelConvolution3D(in_channels, out_channels))
-            else:
-                self.up.append(
-                    UpBlock(
-                        in_channels=in_channels,
-                        out_channels=after_channels,
-                        n_up=n_up_per_enc
-                    )
+            self.up.append(
+                UpBlock(
+                    in_channels=in_channels,
+                    out_channels=after_channels,
+                    n_up=n_up_per_enc
                 )
+            )
 
             after_channels = before_channels
+
+        self.out = FixupResBlock(base_network_channels, out_channels, mode='out')
+        # self.out = SubPixelConvolution3D(base_network_channels*2, out_channels)
 
 
     def forward(self, quantizations):
         for i, (quantization, up) in enumerate(reversed(list(zip(quantizations, self.up)))):
             out = quantization if i == 0 else torch.cat([quantization, out], dim=1)
             out = up(out)
+
+        out = self.out(out)
 
         return out
 
@@ -230,7 +220,8 @@ class FixupResBlock(torch.nn.Module):
     def __init__(self, in_channels, out_channels, mode):
         super(FixupResBlock, self).__init__()
 
-        assert mode in ("down", "same", "up")
+        assert mode in ("down", "same", "up", "out")
+        self.mode = mode
 
         self.bias1a, self.bias1b, self.bias2a, self.bias2b = (
             nn.Parameter(torch.zeros(1)) for _ in range(4)
@@ -242,7 +233,7 @@ class FixupResBlock(torch.nn.Module):
         if mode == 'down':
             conv = nn.Conv3d
             kernel_size, stride = 3, 2
-        elif mode == 'same':
+        elif mode in ('same', 'out'):
             conv = nn.Conv3d
             kernel_size, stride = 3, 1
         else: # mode == 'up'
@@ -273,13 +264,15 @@ class FixupResBlock(torch.nn.Module):
 
     def forward(self, input):
         out = self.branch_conv1(input + self.bias1a)
-        out = self.nca(self.activation(out + self.bias1b))
+        out = self.activation(out + self.bias1b)
 
         out = self.branch_conv2(out + self.bias2a)
         out = out * self.scale + self.bias2b
 
-        out += self.nca(self.skip_conv(input + self.bias1a))
-        out = self.activation(out)
+        out += self.skip_conv(input + self.bias1a)
+
+        if self.mode != 'out':
+            out = self.activation(out)
 
         return out
 
