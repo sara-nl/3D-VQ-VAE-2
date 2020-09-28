@@ -19,20 +19,15 @@ class Logistic(dist.TransformedDistribution):
         super(Logistic, self).__init__(base_distribution, transforms)
 
 
-def mixture_nll_loss(
-    x: torch.Tensor,
+def create_mixture(
     base_dist: Type[dist.Distribution],
     n_mix: int,
     mixture_comp_logits: torch.Tensor,
-    bounds: Optional[Tuple[Union[float, None], Union[float, None]]] = None,
-    reduce_mean: bool = True,
     **base_dist_kwargs
-    ) -> torch.Tensor:
+) -> MixtureSameFamily:
     '''
-    x has minimum dim of B x W
     expects every base_dist_kwarg to be a Sequence of length n_mix
     '''
-
 
     # Checking correct shape of inputs and permuting to have mixture component dim last
     num_dims = len(mixture_comp_logits.shape)
@@ -47,17 +42,66 @@ def mixture_nll_loss(
         assert channel == n_mix
         base_dist_kwargs[param] = values.permute(axes)
 
-
     dists = base_dist(**base_dist_kwargs)
     pi_k = dist.Categorical(logits=mixture_comp_logits)
     mixture_model = MixtureSameFamily(pi_k, dists)
 
-    nll = -mixture_model.log_prob(x.squeeze())
+    return mixture_model
 
+    
+
+def mixture_nll_loss(
+    x: torch.Tensor,
+    base_dist: Type[dist.Distribution],
+    n_mix: int,
+    mixture_comp_logits: torch.Tensor,
+    reduce_mean: bool = True,
+    **base_dist_kwargs
+) -> torch.Tensor:
+    '''
+    x has minimum dim of B x W
+    expects every base_dist_kwarg to be a Sequence of length n_mix
+    '''
+
+    mixture_model = create_mixture(
+        base_dist=base_dist,
+        n_mix=n_mix,
+        mixture_comp_logits=mixture_comp_logits,
+        **base_dist_kwargs
+    )
+
+    nll = -mixture_model.log_prob(x.squeeze())
     if reduce_mean:
         nll = nll.mean()
 
     return nll
+
+def sample_mixture(
+    base_dist: Type[dist.Distribution],
+    n_mix: int,
+    mixture_comp_logits: torch.Tensor,
+    greedy=True,
+    **base_dist_kwargs
+) -> torch.Tensor:
+    
+    if greedy:
+        mixture_comp_logits = mixture_comp_logits.clone()
+
+        pos_bool_idx = torch.nn.functional.one_hot(
+            mixture_comp_logits.max(dim=1)[1], n_mix
+        ).to(dtype=torch.bool)
+
+        mixture_comp_logits[pos_bool_idx] = 0
+        mixture_comp_logits[~pos_bool_idx] = float('-inf')
+
+    mixture_model = create_mixture(
+        base_dist=base_dist,
+        n_mix=n_mix,
+        mixture_comp_logits=mixture_comp_logits,
+        **base_dist_kwargs
+    )
+
+    return mixture_model.sample()
 
 
 
@@ -74,5 +118,8 @@ if __name__ == '__main__':
 
     loss = mixture_nll_loss(test_in, Logistic, n_mix, mix, loc=locs, scale=scales)
     print(loss)
+
+    sample = sample_mixture(Logistic, n_mix, mix, loc=locs, scale=scales)
+    print(sample.shape)
 
 

@@ -12,7 +12,7 @@ from _utils import CTScanDataset
 
 
 class CTDataModule(pl.LightningDataModule):
-    def __init__(self, path, batch_size=64, train_frac=0.5, num_workers=5):
+    def __init__(self, path, batch_size=64, train_frac=1, num_workers=5):
         super().__init__()
         assert 0 <= train_frac <= 1
 
@@ -33,7 +33,7 @@ class CTDataModule(pl.LightningDataModule):
             transforms.ShiftIntensity(offset=1),
             transforms.SpatialPad(spatial_size=(512, 512, 128), mode='constant'),
             transforms.RandSpatialCrop(roi_size=(512, 512, 128), random_size=False),
-            # transforms.Resize(spatial_size=(256, 256, 128)),
+            transforms.Resize(spatial_size=(256, 256, 64)),
             transforms.ToTensor()
         ])
 
@@ -58,18 +58,18 @@ class CTDataModule(pl.LightningDataModule):
 
 
 def main(args):
-    datamodule = CTDataModule(path=args.dataset_path, batch_size=args.batch_size, num_workers=6)
+    datamodule = CTDataModule(path=args.dataset_path, batch_size=args.batch_size, num_workers=5)
 
-    n_mix = 3
-    model = VQVAE(output_channels=n_mix*3)
+    n_mix = 10
+    model = VQVAE(n_mix=n_mix, output_channels=n_mix*3)
 
-    checkpoint_callback = pl.callbacks.model_checkpoint.ModelCheckpoint(save_last=True, save_top_k=5)
+    checkpoint_callback = pl.callbacks.model_checkpoint.ModelCheckpoint(save_last=True, save_top_k=3)
 
     trainer = pl.Trainer(
-        gpus=1,
+        gpus=4,
         auto_select_gpus=True,
-        # distributed_backend='ddp',
-        # benchmark=True,
+        distributed_backend='ddp',
+        benchmark=True,
 
         max_epochs=200,
         terminate_on_nan=True,
@@ -78,7 +78,6 @@ def main(args):
 
         checkpoint_callback=checkpoint_callback,
         row_log_interval=100,
-        # val_check_interval=100,
         log_save_interval=1000,
     )
     trainer.fit(model, datamodule)
@@ -87,7 +86,7 @@ def main(args):
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser = pl.Trainer.add_argparse_args(parser)
-    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("dataset_path", type=Path)
     args = parser.parse_args()
 

@@ -21,6 +21,7 @@ class VQVAE(pl.LightningModule):
         self,
         input_channels=1,
         output_channels=1,
+        n_mix=5,
         base_network_channels=4,
         n_bottleneck_blocks=3,
         n_blocks_per_bottleneck=2
@@ -43,6 +44,7 @@ class VQVAE(pl.LightningModule):
             n_up_per_enc=n_blocks_per_bottleneck,
         )
 
+        self.n_mix = n_mix
         self.apply(lambda x: x.initialize_weights(num_layers=num_layers) if isinstance(x, FixupResBlock) else None)
 
     def forward(self, data):
@@ -64,40 +66,12 @@ class VQVAE(pl.LightningModule):
         x, _ = batch
         recon = self(x)
 
-        n_mix = 3   
+        n_mix = self.n_mix
         pi_k, locs, scales = torch.split(recon, n_mix, dim=1)
         nll_loss = mixture_nll_loss(x, Logistic, n_mix, pi_k, loc=locs, scale=scales.exp())
-        # mse_loss = F.mse_loss(input=recon, target=x)
-        # mse_loss = F.mse_loss(input=recon, target=x)
-        # ssim_loss = 1-ssim3D(recon, x)
         result = pl.TrainResult(minimize=nll_loss)
 
-        # result.log('train_loss', ssim_loss, prog_bar=True)
-        # result.log('train_mse', mse_loss, prog_bar=True)
-
         return result
-
-    # def validation_step(self, batch, batch_idx):
-        # pass
-        # x, _ = batch
-
-        # quantization_losses, quantizations, *_ = zip(*self.encode(x))
-        # recon = self.decode(quantizations)
-
-        # mse_loss = F.mse_loss(input=recon, target=x)
-        # ssim_loss = 1-ssim3D(recon, x)
-        # # baur_loss = baur_loss_f(
-        # #     recon=recon,
-        # #     target=x,
-        # #     quantization_losses=quantization_losses
-        # # )
-
-        # result = pl.EvalResult(checkpoint_on=ssim_loss)
-        # result.log('val_mse', mse_loss)
-        # result.log('val_loss', ssim_loss)
-        # # result.log('val_baur', baur_loss)
-
-        # return result
 
 
 class DownBlock(nn.Module):
@@ -217,7 +191,7 @@ class Decoder(nn.Module):
             ))
 
             after_channels = before_channels
-        
+
         self.out = FixupResBlock(base_network_channels, out_channels, mode='out')
 
     def forward(self, quantizations):
