@@ -22,7 +22,6 @@ def mixture_nll_loss(
     base_dist: Type[dist.Distribution],
     n_mix: int,
     mixture_comp_logits: torch.Tensor,
-    bounds: Optional[Tuple[Union[float, None], Union[float, None]]] = None,
     reduce_mean: bool = True,
     **base_dist_kwargs
     ) -> torch.Tensor:
@@ -30,7 +29,6 @@ def mixture_nll_loss(
     x has minimum dim of B x W
     expects every base_dist_kwarg to be a Sequence of length n_mix
     '''
-
 
     # Checking correct shape of inputs and permuting to have mixture component dim last
     num_dims = len(mixture_comp_logits.shape)
@@ -45,19 +43,32 @@ def mixture_nll_loss(
         assert channel == n_mix
         base_dist_kwargs[param] = values.permute(axes)
 
-
-    dists = base_dist(**base_dist_kwargs)
     pi_k = dist.Categorical(logits=mixture_comp_logits)
-    mixture_model = MixtureSameFamily(pi_k, dists)
+    dists = base_dist(**base_dist_kwargs)
 
-    nll = -mixture_model.log_prob(x.squeeze())
+    nll_loss = generic_nll_loss(
+        x,
+        base_dist=MixtureSameFamily,
+        mixture_distribution=pi_k,
+        component_distribution=dists,
+        reduce_mean=reduce_mean
+    )
 
-    if reduce_mean:
-        nll = nll.mean()
-
-    return nll
+    return nll_loss
 
 
+def generic_nll_loss(
+    x: torch.Tensor,
+    base_dist: Type[dist.Distribution],
+    reduce_mean: bool = True,
+    **base_dist_kwargs
+) -> torch.Tensor:
+
+    return (
+        (nll := -base_dist(**base_dist_kwargs).log_prob(x.squeeze()))
+        if not reduce_mean
+        else nll.mean()
+    )
 
 if __name__ == '__main__':
     n_mix = 10
