@@ -64,10 +64,11 @@ def generic_nll_loss(
     **base_dist_kwargs
 ) -> torch.Tensor:
 
+    nll_loss = -base_dist(**base_dist_kwargs).log_prob(x.squeeze())
     return (
-        (nll := -base_dist(**base_dist_kwargs).log_prob(x.squeeze()))
+        nll_loss
         if not reduce_mean
-        else nll.mean()
+        else nll_loss.mean()
     )
 
 if __name__ == '__main__':
