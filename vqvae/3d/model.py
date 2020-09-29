@@ -5,23 +5,33 @@ This is largely a refactor of https://github.com/danieltudosiu/nmpevqvae
 from itertools import zip_longest
 
 import numpy as np
+import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
+from torch.distributions.normal import Normal
 from torch import nn
-import pytorch_lightning as pl
 
 from metrics.ssim import ssim3D
+from metrics.distribution import generic_nll_loss
 
 class VQVAE(pl.LightningModule):
     def __init__(
         self,
         input_channels=1,
+        output_channels=1,
         base_network_channels=4,
         n_bottleneck_blocks=3,
-        n_blocks_per_bottleneck=2
+        n_blocks_per_bottleneck=2,
+        metric='normal_nll'
     ):
 
         super(VQVAE, self).__init__()
+        self.save_hyperparameters()
+
+        if metric == 'normal_nll':
+            self.loss_f = self.normal_nll
+        elif metric == 'mse':
+            self.loss_f = self.mse
 
         num_layers = (3 * n_bottleneck_blocks - 1) * n_blocks_per_bottleneck + 2 * n_bottleneck_blocks
 
@@ -32,7 +42,7 @@ class VQVAE(pl.LightningModule):
             n_down_per_enc=n_blocks_per_bottleneck,
         )
         self.decoder = Decoder(
-            out_channels=input_channels,
+            out_channels=output_channels,
             base_network_channels=base_network_channels,
             n_enc=n_bottleneck_blocks,
             n_up_per_enc=n_blocks_per_bottleneck,
@@ -52,28 +62,69 @@ class VQVAE(pl.LightningModule):
         return self.decoder(quantizations)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
-        return optimizer
+        base_lr, max_lr = 1e-5, 5e-2
+
+        train_loader = self.train_dataloader()
+        if self.use_ddp:
+            multiplier = train_loader.batch_size * len(self.trainer.gpus) * self.trainer.world_size / 2
+            base_lr *= multiplier
+            max_lr *= multiplier
+
+        optimizer = torch.optim.Adam(self.parameters(), lr=base_lr)
+        scheduler = torch.optim.lr_scheduler.CyclicLR(
+            optimizer,
+            base_lr=base_lr,
+            max_lr=max_lr,
+            step_size_up=len(train_loader)*2, # *2 as advised by CLR github
+            cycle_momentum=False
+        )
+
+        return [optimizer], [scheduler]
 
     def training_step(self, batch, batch_idx):
-        x, _ = batch
-        recon = self(x)
-        loss = F.mse_loss(input=recon, target=x)
-        result = pl.TrainResult(minimize=loss)
-        result.log('train_loss', loss, prog_bar=True)
-
-        return result
+        return self.shared_step(batch, mode='train')
 
     def validation_step(self, batch, batch_idx):
-        x, _ = batch
-        recon = self(x)
-        mse_loss = F.mse_loss(input=recon, target=x)
-        ssim = ssim3D(recon, x)
+        return self.shared_step(batch, mode='validation')
 
-        result = pl.EvalResult()
-        result.log('val_loss', mse_loss)
+    def shared_step(self, batch, batch_idx, mode='train'):
+        assert mode in ('train', 'validation')
+
+        loss, log_dict = self.loss_f(batch, batch_idx)
+
+        if mode == 'train':
+            result = pl.TrainResult(minimize=loss)
+            result.log('train_loss', loss)
+        else: # mode == 'validation'
+            result = pl.EvalResult(checkpoint_on=loss)
+            result.log('val_loss', loss)
+
+        result.log_dict(log_dict)
 
         return result
+
+    def normal_nll(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
+        x, _ = batch
+
+        loc, log_scale = self(x).transpose(0, 1)
+        log_scale = torch.max(log_scale, torch.Tensor([-7]).to(device=self.device)) # lower bound log_scale
+        loss = generic_nll_loss(x, Normal, loc=loc, scale=log_scale.exp(), reduce_mean=True)
+
+        log_dict = {
+            'loc mean': loc.mean(),
+            'loc min': loc.min(),
+            'loc max': loc.max(),
+            'loc std': loc.std(),
+            'log_scale mean': log_scale.mean(),
+            'log_scale min': log_scale.min(),
+            'log_scale max': log_scale.max(),
+            'log_scale std': log_scale.std()
+        }
+
+        return loss, log_dict
+
+    def mse(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
+        raise NotImplementedError
 
 
 class DownBlock(nn.Module):
@@ -123,7 +174,6 @@ class PreQuantization(nn.Module):
             data = torch.cat([data, self.upsample(auxilary)], dim=1)
 
         return self.pre_q(data)
-
 
 
 class Encoder(nn.Module):

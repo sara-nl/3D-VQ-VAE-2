@@ -4,6 +4,7 @@ from pathlib import Path
 import torch
 import pytorch_lightning as pl
 import numpy as np
+import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, random_split
 from monai import transforms
 
@@ -12,7 +13,7 @@ from utils import CTScanDataset
 
 
 class CTDataModule(pl.LightningDataModule):
-    def __init__(self, path, batch_size=64, train_frac=0.9, num_workers=6):
+    def __init__(self, path, batch_size=64, train_frac=0.95, num_workers=6):
         super().__init__()
         assert 0 <= train_frac <= 1
 
@@ -33,7 +34,6 @@ class CTDataModule(pl.LightningDataModule):
             transforms.ShiftIntensity(offset=1),
             transforms.SpatialPad(spatial_size=(512, 512, 128), mode='constant'),
             transforms.RandSpatialCrop(roi_size=(512, 512, 128), random_size=False),
-            # transforms.Resize(spatial_size=(256, 256, 128)),
             transforms.ToTensor()
         ])
 
@@ -60,9 +60,10 @@ class CTDataModule(pl.LightningDataModule):
 def main(args):
     datamodule = CTDataModule(path=args.dataset_path, batch_size=args.batch_size, num_workers=6)
 
-    model = VQVAE()
+    model = VQVAE(output_channels=2, metric='normal_nll')
 
     checkpoint_callback = pl.callbacks.model_checkpoint.ModelCheckpoint(save_last=True, save_top_k=5)
+    lr_logger = pl.callbacks.lr_logger.LearningRateLogger()
 
     trainer = pl.Trainer(
         gpus=4,
@@ -79,14 +80,17 @@ def main(args):
         row_log_interval=100,
         val_check_interval=100,
         log_save_interval=1000,
+
+        callbacks=[lr_logger],
     )
+
     trainer.fit(model, datamodule)
 
 
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser = pl.Trainer.add_argparse_args(parser)
-    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("dataset_path", type=Path)
     args = parser.parse_args()
 
