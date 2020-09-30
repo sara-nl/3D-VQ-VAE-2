@@ -3,6 +3,7 @@ This is largely a refactor of https://github.com/danieltudosiu/nmpevqvae
 """
 
 from itertools import zip_longest
+from typing import Tuple
 
 import numpy as np
 import pytorch_lightning as pl
@@ -62,7 +63,7 @@ class VQVAE(pl.LightningModule):
         return self.decoder(quantizations)
 
     def configure_optimizers(self):
-        base_lr, max_lr = 1e-5, 5e-2
+        base_lr, max_lr = 1e-5, 5e-3
 
         train_loader = self.train_dataloader()
         if self.use_ddp:
@@ -82,10 +83,10 @@ class VQVAE(pl.LightningModule):
         return [optimizer], [scheduler]
 
     def training_step(self, batch, batch_idx):
-        return self.shared_step(batch, mode='train')
+        return self.shared_step(batch, batch_idx, mode='train')
 
     def validation_step(self, batch, batch_idx):
-        return self.shared_step(batch, mode='validation')
+        return self.shared_step(batch, batch_idx, mode='validation')
 
     def shared_step(self, batch, batch_idx, mode='train'):
         assert mode in ('train', 'validation')

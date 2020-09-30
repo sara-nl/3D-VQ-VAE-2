@@ -63,7 +63,7 @@ def main(args):
     model = VQVAE(output_channels=2, metric='normal_nll')
 
     checkpoint_callback = pl.callbacks.model_checkpoint.ModelCheckpoint(save_last=True, save_top_k=5)
-    lr_logger = pl.callbacks.lr_logger.LearningRateLogger()
+    lr_logger = pl.callbacks.lr_logger.LearningRateLogger(logging_interval='step')
 
     trainer = pl.Trainer(
         gpus=4,
@@ -77,8 +77,8 @@ def main(args):
         profiler=None,
 
         checkpoint_callback=checkpoint_callback,
-        row_log_interval=100,
-        val_check_interval=100,
+        row_log_interval=50,
+        val_check_interval=50,
         log_save_interval=1000,
 
         callbacks=[lr_logger],
