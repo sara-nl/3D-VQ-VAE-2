@@ -4,6 +4,7 @@ This is largely a refactor of https://github.com/danieltudosiu/nmpevqvae
 
 from itertools import zip_longest
 from typing import Tuple
+from argparse import ArgumentParser
 
 import numpy as np
 import pytorch_lightning as pl
@@ -16,34 +17,45 @@ from metrics.ssim import ssim3D
 from metrics.distribution import generic_nll_loss
 
 class VQVAE(pl.LightningModule):
+    supported_metrics = ("mse", "normal_nll") # first in line is the default
+
     def __init__(
         self,
-        input_channels=1,
-        output_channels=1,
-        base_network_channels=4,
-        n_bottleneck_blocks=3,
-        n_blocks_per_bottleneck=2,
-        metric='normal_nll'
+        metric: str,
+        input_channels: int,
+        base_network_channels: int,
+        n_bottleneck_blocks: int,
+        n_blocks_per_bottleneck: int,
     ):
 
         super(VQVAE, self).__init__()
-        self.save_hyperparameters()
 
-        if metric == 'normal_nll':
-            self.loss_f = self.normal_nll
-        elif metric == 'mse':
-            self.loss_f = self.mse
+        assert metric in self.supported_metrics
+
+        def _parse_input_args():
+            if metric == 'normal_nll':
+                self.loss_f = self.normal_nll
+                out_multiplier = 2
+            elif metric == 'mse':
+                self.loss_f = self.mse
+                out_multiplier = 1
+
+            self.input_channels = input_channels
+            self.output_channels = self.input_channels * out_multiplier
+
+        self.save_hyperparameters()
+        _parse_input_args()
 
         num_layers = (3 * n_bottleneck_blocks - 1) * n_blocks_per_bottleneck + 2 * n_bottleneck_blocks
 
         self.encoder = Encoder(
-            in_channels=input_channels,
+            in_channels=self.input_channels,
             base_network_channels=base_network_channels,
             n_enc=n_bottleneck_blocks,
             n_down_per_enc=n_blocks_per_bottleneck,
         )
         self.decoder = Decoder(
-            out_channels=output_channels,
+            out_channels=self.output_channels,
             base_network_channels=base_network_channels,
             n_enc=n_bottleneck_blocks,
             n_up_per_enc=n_blocks_per_bottleneck,
@@ -126,6 +138,20 @@ class VQVAE(pl.LightningModule):
 
     def mse(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
         raise NotImplementedError
+
+
+    @classmethod
+    def add_model_specific_args(cls, parent_parser):
+        parser = ArgumentParser(parents=[parent_parser], add_help=False)
+
+        parser.add_argument('--input-channels', type=int, default=1)
+        parser.add_argument('--base-network_channels', type=int, default=4)
+        parser.add_argument('--n-bottleneck-blocks', type=int, default=3)
+        parser.add_argument('--n-blocks-per-bottleneck', type=int, default=2)
+        parser.add_argument('--metric', choices=cls.supported_metrics, default=cls.supported_metrics[0])
+
+        return parser
+
 
 
 class DownBlock(nn.Module):

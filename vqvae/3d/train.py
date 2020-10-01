@@ -1,4 +1,4 @@
-from argparse import ArgumentParser
+from argparse import ArgumentParser, Namespace
 from pathlib import Path
 
 import torch
@@ -60,13 +60,19 @@ class CTDataModule(pl.LightningDataModule):
 def main(args):
     datamodule = CTDataModule(path=args.dataset_path, batch_size=args.batch_size, num_workers=6)
 
-    model = VQVAE(output_channels=2, metric='normal_nll')
+    model = VQVAE(
+        metric = args.metric,
+        input_channels = args.input_channels,
+        base_network_channels = args.base_network_channels,
+        n_bottleneck_blocks = args.n_bottleneck_blocks,
+        n_blocks_per_bottleneck = args.n_blocks_per_bottleneck,
+    )
 
     checkpoint_callback = pl.callbacks.model_checkpoint.ModelCheckpoint(save_last=True, save_top_k=5)
     lr_logger = pl.callbacks.lr_logger.LearningRateLogger(logging_interval='step')
 
     trainer = pl.Trainer(
-        gpus=4,
+        gpus=args.gpus,
         auto_select_gpus=True,
         distributed_backend='ddp',
         benchmark=True,
@@ -89,9 +95,14 @@ def main(args):
 
 if __name__ == '__main__':
     parser = ArgumentParser()
+
     parser = pl.Trainer.add_argparse_args(parser)
-    parser.add_argument("--batch-size", type=int, default=2)
+    parser = VQVAE.add_model_specific_args(parser)
+
+    parser.add_argument("--batch-size", type=int)
     parser.add_argument("dataset_path", type=Path)
+
     args = parser.parse_args()
+
 
     main(args)
