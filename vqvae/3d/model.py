@@ -3,49 +3,61 @@ This is largely a refactor of https://github.com/danieltudosiu/nmpevqvae
 """
 
 from itertools import zip_longest
+from typing import Tuple
+from argparse import ArgumentParser, Namespace
 
 import numpy as np
+import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
+from torch.distributions.normal import Normal
 from torch import nn
-import pytorch_lightning as pl
 
 from metrics.ssim import ssim3D
 from metrics.baur import BaurLoss3D
-from metrics.mixture_model import Logistic, mixture_nll_loss
+from metrics.distribution import Logistic, mixture_nll_loss, generic_nll_loss
+
 
 baur_loss_f = BaurLoss3D(lambda_reconstruction=1)
 
+def _sub_metric_log_dict(sub_metric_name, sub_metric):
+    return {
+        f'{sub_metric_name}_{func_name}': func(sub_metric.detach())
+        for func_name, func in (
+            ('min', torch.min),
+            ('max', torch.max),
+            ('mean', torch.mean),
+            ('std', torch.std)
+        )
+    }
+
+
 class VQVAE(pl.LightningModule):
-    def __init__(
-        self,
-        input_channels=1,
-        output_channels=1,
-        n_mix=5,
-        base_network_channels=4,
-        n_bottleneck_blocks=3,
-        n_blocks_per_bottleneck=2
-    ):
+
+    # first in line is the default
+    supported_metrics = ("mse", "normal_nll", "logistic_mixture_nll")
+
+    def __init__(self, args: Namespace):
 
         super(VQVAE, self).__init__()
 
-        num_layers = (3 * n_bottleneck_blocks - 1) * n_blocks_per_bottleneck + 2 * n_bottleneck_blocks
+        self.save_hyperparameters()
+        self._parse_input_args(args)
 
         self.encoder = Encoder(
-            in_channels=input_channels,
-            base_network_channels=base_network_channels,
-            n_enc=n_bottleneck_blocks,
-            n_down_per_enc=n_blocks_per_bottleneck,
+            in_channels=self.input_channels,
+            base_network_channels=self.base_network_channels,
+            n_enc=self.n_bottleneck_blocks,
+            n_down_per_enc=self.n_blocks_per_bottleneck,
         )
         self.decoder = Decoder(
-            out_channels=output_channels,
-            base_network_channels=base_network_channels,
-            n_enc=n_bottleneck_blocks,
-            n_up_per_enc=n_blocks_per_bottleneck,
+            out_channels=self.output_channels,
+            base_network_channels=self.base_network_channels,
+            n_enc=self.n_bottleneck_blocks,
+            n_up_per_enc=self.n_blocks_per_bottleneck,
         )
 
-        self.n_mix = n_mix
-        self.apply(lambda x: x.initialize_weights(num_layers=num_layers) if isinstance(x, FixupResBlock) else None)
+        self.apply(lambda layer: layer.initialize_weights(num_layers=self.num_layers) if isinstance(layer, FixupResBlock) else None)
 
     def forward(self, data):
         _, quantizations, _, _, _ = zip(*self.encode(data)) # list transpose of encoder outputs
@@ -59,19 +71,122 @@ class VQVAE(pl.LightningModule):
         return self.decoder(quantizations)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
-        return optimizer
+        base_lr, max_lr = 1e-5, 5e-3
+
+        train_loader = self.train_dataloader()
+        if self.use_ddp:
+            multiplier = train_loader.batch_size * len(self.trainer.gpus) * self.trainer.world_size / 2
+            base_lr *= multiplier
+            max_lr *= multiplier
+
+        optimizer = torch.optim.Adam(self.parameters(), lr=base_lr)
+        scheduler = torch.optim.lr_scheduler.CyclicLR(
+            optimizer,
+            base_lr=base_lr,
+            max_lr=max_lr,
+            step_size_up=5, # *2 as advised by CLR github
+            cycle_momentum=False
+        )
+
+        return [optimizer], [scheduler]
 
     def training_step(self, batch, batch_idx):
-        x, _ = batch
-        recon = self(x)
+        return self.shared_step(batch, batch_idx, mode='train')
 
-        n_mix = self.n_mix
-        pi_k, locs, scales = torch.split(recon, n_mix, dim=1)
-        nll_loss = mixture_nll_loss(x, Logistic, n_mix, pi_k, loc=locs, scale=scales.exp())
-        result = pl.TrainResult(minimize=nll_loss)
+    def validation_step(self, batch, batch_idx):
+        return self.shared_step(batch, batch_idx, mode='validation')
+
+    def shared_step(self, batch, batch_idx, mode='train'):
+        assert mode in ('train', 'validation')
+
+        loss, log_dict = self.recon_loss_f(batch, batch_idx)
+
+        if mode == 'train':
+            result = pl.TrainResult(minimize=loss)
+        else: # mode == 'validation'
+            result = pl.EvalResult(checkpoint_on=loss)
+
+        # logging
+        result.log_dict({f'{mode}_{key}': val for key, val in log_dict.items()})
 
         return result
+
+    def normal_nll(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
+        x, _ = batch
+
+        loc, log_scale = torch.split(self(x), self.input_channels, dim=1)
+        log_scale = torch.max(log_scale, torch.Tensor([-7]).to(device=self.device)) # lower bound log_scale
+        unreduced_loss = generic_nll_loss(x, Normal, loc=loc, scale=log_scale.exp(), reduce_sum=False)
+
+        log_dict = {
+            **_sub_metric_log_dict('loss', unreduced_loss),
+            **_sub_metric_log_dict('loc', loc),
+            **_sub_metric_log_dict('log_scale', log_scale),
+        }
+
+        return unreduced_loss.mean(), log_dict
+
+    def mse(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
+        raise NotImplementedError
+
+    def logistic_mixture_nll(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
+        x, _ = batch
+
+        pi_k, loc, log_scale = torch.split(x, self.n_mix, dim=1)
+        nll_loss = mixture_nll_loss(x, Logistic, self.n_mix, pi_k, loc=loc, scale=log_scale.exp(), reduce_sum=True)
+
+        log_dict = {
+            **_sub_metric_log_dict('pi_k', pi_k),
+            **_sub_metric_log_dict('loc', loc),
+            **_sub_metric_log_dict('log_scale', log_scale),
+        }
+
+        return nll_loss, log_dict
+
+
+    def _parse_input_args(self, args: Namespace):
+        assert args.metric in self.supported_metrics
+
+        if args.metric == 'normal_nll':
+            self.recon_loss_f = self.normal_nll
+            out_multiplier = 2
+        elif args.metric == 'mse':
+            self.recon_loss_f = self.mse
+            out_multiplier = 1
+        elif args.metric == 'logistic_mixture_nll':
+            self.recon_loss_f = self.logistic_mixture_nll
+            self.n_mix = args.n_mix
+            out_multiplier = args.n_mix
+
+        self.output_channels = args.input_channels * out_multiplier
+        self.input_channels = args.input_channels
+        self.base_network_channels = args.base_network_channels
+        self.n_bottleneck_blocks = args.n_bottleneck_blocks
+        self.n_blocks_per_bottleneck = args.n_blocks_per_bottleneck
+
+        self.num_layers = (
+            (3 * args.n_bottleneck_blocks - 1)
+            * args.n_blocks_per_bottleneck
+            + (2 * args.n_bottleneck_blocks)
+        )
+
+
+    @classmethod
+    def add_model_specific_args(cls, parent_parser):
+        parser = ArgumentParser(parents=[parent_parser], add_help=False)
+
+        parser.add_argument('--input-channels', type=int, default=1)
+        parser.add_argument('--base-network_channels', type=int, default=4)
+        parser.add_argument('--n-bottleneck-blocks', type=int, default=3)
+        parser.add_argument('--n-blocks-per-bottleneck', type=int, default=2)
+        parser.add_argument('--metric', choices=cls.supported_metrics, default=cls.supported_metrics[0])
+
+        # loss function specific arguments
+        # FIXME: put this is a class or something, at least not here
+        parser.add_argument('--n-mix', default=5)
+
+        return parser
+
 
 
 class DownBlock(nn.Module):
@@ -121,7 +236,6 @@ class PreQuantization(nn.Module):
             data = torch.cat([data, self.upsample(auxilary)], dim=1)
 
         return self.pre_q(data)
-
 
 
 class Encoder(nn.Module):
@@ -196,11 +310,10 @@ class Decoder(nn.Module):
 
     def forward(self, quantizations):
         for i, (quantization, up) in enumerate(reversed(list(zip(quantizations, self.up)))):
-            up_input = quantization if i == 0 else torch.cat([quantization, prev_up], dim=1)
+            out = quantization if i == 0 else torch.cat([quantization, out], dim=1)
+            out = up(out)
 
-            prev_up = up(up_input)
-
-        out = self.out(prev_up)
+        out = self.out(out)
 
         return out
 
@@ -229,15 +342,12 @@ class FixupResBlock(torch.nn.Module):
         if mode == 'down':
             conv = nn.Conv3d
             kernel_size, stride, padding = 3, 2, 1
-        elif mode == 'same':
+        elif mode in ('same', 'out'):
             conv = nn.Conv3d
             kernel_size, stride, padding = 3, 1, 1
         elif mode == 'up':
             conv = nn.ConvTranspose3d
             kernel_size, stride, padding = 4, 2, 1
-        else: # mode == 'out'
-            conv = nn.Conv3d
-            kernel_size, stride, padding = 1, 1, 0
 
         self.branch_conv1, self.skip_conv = (
             conv(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
@@ -245,11 +355,10 @@ class FixupResBlock(torch.nn.Module):
             for _ in range(2)
         )
 
-
         self.branch_conv2 = torch.nn.Conv3d(
             in_channels=out_channels,
             out_channels=out_channels,
-            kernel_size=3 if mode != 'out' else 1,
+            kernel_size=3,
             stride=1,
             padding=padding,
             bias=False,

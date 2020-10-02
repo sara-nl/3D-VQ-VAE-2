@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 from monai import transforms
 
 from model import VQVAE
-from _utils import CTScanDataset
+from utils import CTScanDataset
 
 
 def main(args: Namespace):

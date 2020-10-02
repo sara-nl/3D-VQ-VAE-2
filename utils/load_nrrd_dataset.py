@@ -33,7 +33,7 @@ class CTScanDataset(Dataset):
 
         scans = np.array(list(map(str, Path(root).glob(f'**/*{ext}'))))
         scan_sizes = np.array([nrrd.read_header(str(scan_path))['sizes'] for scan_path in scans])
-        # I know we're reading the scans thrice, but I get some strange Nones when I try
+        # I know we're reading the scans twice, but I get some strange Nones when I try
         # to do it in one go.
         # types = np.array([nrrd.read_header(str(scan_path))['type'] for scan_path in scans])
 
@@ -48,10 +48,6 @@ class CTScanDataset(Dataset):
 
         if len(faulty_spacing):
             print(f"Found {len(faulty_spacing)} scans where their spacing doesn't match the input spacing {spacing}. Ignoring scans {scans[faulty_spacing]}")
-
-        # faulty_types = np.where(types != 'short')[0]
-        # if len(faulty_types):
-        #     print(f"Found {len(faulty_types)} scans where their is not 'short'. Ignoring scans {scans[faulty_types]}")
 
         faulty_sizes = np.unique(np.where(~(scan_sizes == size).T[np.where(size)[0]])[1])
         if len(faulty_sizes):

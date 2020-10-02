@@ -19,17 +19,86 @@ class Logistic(dist.TransformedDistribution):
         super(Logistic, self).__init__(base_distribution, transforms)
 
 
-def create_mixture(
+def mixture_nll_loss(
+    x: torch.Tensor,
     base_dist: Type[dist.Distribution],
     n_mix: int,
     mixture_comp_logits: torch.Tensor,
+    reduce_sum: bool = True,
     **base_dist_kwargs
-) -> MixtureSameFamily:
+) -> torch.Tensor:
     '''
+    x has minimum dim of B x W
     expects every base_dist_kwarg to be a Sequence of length n_mix
     '''
+    # mixture distribution needs to have channel last
+    mixture_comp_logits, base_dist_kwargs = _fix_mixture_shapes(
+        n_mix, mixture_comp_logits, **base_dist_kwargs
+    )
 
-    # Checking correct shape of inputs and permuting to have mixture component dim last
+    pi_k = dist.Categorical(logits=mixture_comp_logits)
+    dists = base_dist(**base_dist_kwargs)
+
+    nll_loss = generic_nll_loss(
+        x,
+        base_dist=MixtureSameFamily,
+        mixture_distribution=pi_k,
+        component_distribution=dists,
+        reduce_sum=reduce_sum
+    )
+
+    return nll_loss
+
+
+def sample_mixture(
+    base_dist: Type[dist.Distribution],
+    n_mix: int,
+    mixture_comp_logits: torch.Tensor,
+    greedy=True,
+    **base_dist_kwargs
+) -> torch.Tensor:
+
+
+    mixture_comp_logits, base_dist_kwargs = _fix_mixture_shapes(
+        n_mix, mixture_comp_logits, **base_dist_kwargs
+    )
+
+    if greedy:
+        mixture_comp_logits = mixture_comp_logits.clone()
+
+        pos_bool_idx = torch.nn.functional.one_hot(
+            mixture_comp_logits.max(dim=-1)[1], n_mix
+        ).to(dtype=torch.bool)
+
+        mixture_comp_logits[pos_bool_idx] = 0
+        mixture_comp_logits[~pos_bool_idx] = float('-inf')
+
+    pi_k = dist.Categorical(logits=mixture_comp_logits)
+    dists = base_dist(**base_dist_kwargs)
+
+    mixture_model = MixtureSameFamily(
+        mixture_distribution=pi_k,
+        component_distribution=dists,
+    )
+    return mixture_model.sample()
+
+
+def generic_nll_loss(
+    x: torch.Tensor,
+    base_dist: Type[dist.Distribution],
+    reduce_sum: bool = True,
+    **base_dist_kwargs
+) -> torch.Tensor:
+
+    nll_loss = -base_dist(**base_dist_kwargs).log_prob(x.squeeze())
+    return (
+        nll_loss
+        if not reduce_sum
+        else nll_loss.sum()
+    )
+
+
+def _fix_mixture_shapes(n_mix, mixture_comp_logits, **base_dist_kwargs):
     num_dims = len(mixture_comp_logits.shape)
     assert num_dims >= 2
     axes = (0, *range(2, num_dims), 1)
@@ -41,68 +110,8 @@ def create_mixture(
         _, channel, *_ = values.shape
         assert channel == n_mix
         base_dist_kwargs[param] = values.permute(axes)
-
-    dists = base_dist(**base_dist_kwargs)
-    pi_k = dist.Categorical(logits=mixture_comp_logits)
-    mixture_model = MixtureSameFamily(pi_k, dists)
-
-    return mixture_model
-
     
-
-def mixture_nll_loss(
-    x: torch.Tensor,
-    base_dist: Type[dist.Distribution],
-    n_mix: int,
-    mixture_comp_logits: torch.Tensor,
-    reduce_mean: bool = True,
-    **base_dist_kwargs
-) -> torch.Tensor:
-    '''
-    x has minimum dim of B x W
-    expects every base_dist_kwarg to be a Sequence of length n_mix
-    '''
-
-    mixture_model = create_mixture(
-        base_dist=base_dist,
-        n_mix=n_mix,
-        mixture_comp_logits=mixture_comp_logits,
-        **base_dist_kwargs
-    )
-
-    nll = -mixture_model.log_prob(x.squeeze())
-    if reduce_mean:
-        nll = nll.mean()
-
-    return nll
-
-def sample_mixture(
-    base_dist: Type[dist.Distribution],
-    n_mix: int,
-    mixture_comp_logits: torch.Tensor,
-    greedy=True,
-    **base_dist_kwargs
-) -> torch.Tensor:
-    
-    if greedy:
-        mixture_comp_logits = mixture_comp_logits.clone()
-
-        pos_bool_idx = torch.nn.functional.one_hot(
-            mixture_comp_logits.max(dim=1)[1], n_mix
-        ).to(dtype=torch.bool)
-
-        mixture_comp_logits[pos_bool_idx] = 0
-        mixture_comp_logits[~pos_bool_idx] = float('-inf')
-
-    mixture_model = create_mixture(
-        base_dist=base_dist,
-        n_mix=n_mix,
-        mixture_comp_logits=mixture_comp_logits,
-        **base_dist_kwargs
-    )
-
-    return mixture_model.sample()
-
+    return mixture_comp_logits, base_dist_kwargs
 
 
 if __name__ == '__main__':
