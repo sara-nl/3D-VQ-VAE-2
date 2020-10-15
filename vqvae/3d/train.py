@@ -71,7 +71,7 @@ def main(args):
     lr_logger = pl.callbacks.lr_logger.LearningRateLogger(logging_interval='step')
 
     trainer = pl.Trainer(
-        gpus=args.gpus,
+        gpus="-1",
         auto_select_gpus=True,
         distributed_backend='ddp',
         benchmark=True,

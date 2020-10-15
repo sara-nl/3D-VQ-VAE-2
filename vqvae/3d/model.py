@@ -28,6 +28,7 @@ def _sub_metric_log_dict(sub_metric_name, sub_metric):
                 ('min', torch.min),
                 ('max', torch.max),
                 ('mean', torch.mean),
+                ('median', torch.median),
                 ('std', torch.std)
             )
         }
@@ -36,7 +37,7 @@ def _sub_metric_log_dict(sub_metric_name, sub_metric):
 class VQVAE(pl.LightningModule):
 
     # first in line is the default
-    supported_metrics = ("mse", "rmse", "normal_nll", "logistic_mixture_nll")
+    supported_metrics = ("mse", "rmse", "mae", "huber", "normal_nll", "logistic_mixture_nll")
 
     def __init__(self, args: Namespace):
 
@@ -110,18 +111,20 @@ class VQVAE(pl.LightningModule):
 
         return unreduced_loss.mean(), log_dict
 
-    def mse(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
+    def loc_metric(self, batch, batch_idx, loss_f) -> Tuple[torch.Tensor, dict]:
         x, _ = batch
 
         loc = F.softplus(self(x))
-        unreduced_loss = F.mse_loss(loc, x, reduction='none')
+        unreduced_loss = loss_f(loc, x, reduction='none')
 
         log_dict = {
             **_sub_metric_log_dict('loss', unreduced_loss),
             **_sub_metric_log_dict('loc', loc),
         }
-
         return unreduced_loss.mean(), log_dict
+
+    def mse(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
+        return self.loc_metric(batch, batch_idx, F.mse_loss)
 
     def rmse(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
         mse, log_dict = self.mse(batch, batch_idx)
@@ -131,6 +134,12 @@ class VQVAE(pl.LightningModule):
                 log_dict[key] = value.sqrt()
 
         return mse.sqrt(), log_dict
+
+    def mae(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
+        return self.loc_metric(batch, batch_idx, F.l1_loss)
+
+    def huber(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
+        return self.loc_metric(batch, batch_idx, F.smooth_l1_loss)
 
     def logistic_mixture_nll(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
         x, _ = batch
@@ -158,6 +167,12 @@ class VQVAE(pl.LightningModule):
             out_multiplier = 1
         elif args.metric == 'rmse':
             self.recon_loss_f = self.rmse
+            out_multiplier = 1
+        elif args.metric == 'mae':
+            self.recon_loss_f = self.mae
+            out_multiplier = 1
+        elif args.metric == 'huber':
+            self.recon_loss_f = self.huber
             out_multiplier = 1
         elif args.metric == 'logistic_mixture_nll':
             self.recon_loss_f = self.logistic_mixture_nll
@@ -334,7 +349,7 @@ class Decoder(nn.Module):
 class ResizeConv3D(nn.Conv3d):
     def __init__(self, *conv_args, **conv_kwargs):
         super(ResizeConv3D, self).__init__(*conv_args, **conv_kwargs)
-        self.upsample = nn.Upsample(mode='trilinear', scale_factor=2)
+        self.upsample = nn.Upsample(mode='trilinear', scale_factor=2, align_corners=False)
 
     def forward(self, input):
         return super(ResizeConv3D, self).forward(self.upsample(input))
