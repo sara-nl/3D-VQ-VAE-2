@@ -21,7 +21,7 @@ def main(args: Namespace):
         transforms.ShiftIntensity(offset=1),
         transforms.SpatialPad(spatial_size=(512, 512, 128), mode='constant'),
         transforms.RandSpatialCrop(roi_size=(512, 512, 128), random_size=False),
-        transforms.Resize(spatial_size=(256, 256, 64)),
+        # transforms.Resize(spatial_size=(256, 256, 64)),
         transforms.ToTensor()
     ])
 
@@ -31,17 +31,15 @@ def main(args: Namespace):
     single_sample, _ = next(iter(train_loader))
     single_sample = single_sample.cuda()
 
-    n_mix = 10
-    model = VQVAE(n_mix=n_mix, output_channels=n_mix*3).cuda()
+    model = VQVAE.load_from_checkpoint(str(args.ckpt_path)).cuda()
+    res = model(single_sample)
 
-    ckpt = torch.load(args.ckpt_path)
-    model.load_state_dict(ckpt['state_dict'])
-    out = model(single_sample)
-
-    from metrics.mixture_model import Logistic, sample_mixture
-    pi_k, locs, log_scales = torch.split(out, n_mix, dim=1)
-    res = sample_mixture(Logistic, n_mix, pi_k, greedy=True, loc=locs, scale=log_scales.exp()).squeeze().detach().cpu().numpy()
-    res[res < 0] = 0
+    res = torch.nn.functional.softplus(res)
+    res =  res.squeeze().detach().cpu().numpy()
+    # from metrics.mixture_model import Logistic, sample_mixture
+    # pi_k, locs, log_scales = torch.split(out, n_mix, dim=1)
+    # res = sample_mixture(Logistic, n_mix, pi_k, greedy=True, loc=locs, scale=log_scales.exp()).squeeze().detach().cpu().numpy()
+    # res[res < 0] = 0
     res[res > 4] = 4
 
     nrrd.write(str(args.out_path), res)

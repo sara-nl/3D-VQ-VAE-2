@@ -47,14 +47,19 @@ class CTDataModule(pl.LightningDataModule):
 
         # assign to use in dataloaders
         self.train_dataset = train_split
+        self.train_len = train_len
+        self.train_batch_size = self.batch_size
+
         self.val_dataset = val_split
+        self.val_len = val_len
+        self.val_batch_size = self.batch_size
+
 
     def train_dataloader(self):
         return DataLoader(self.train_dataset, batch_size=self.batch_size, num_workers=self.num_workers, pin_memory=True, shuffle=True, drop_last=True)
 
     def val_dataloader(self):
-        return DataLoader(self.val_dataset, batch_size=self.batch_size, num_workers=1, pin_memory=True, shuffle=False, drop_last=True)
-
+        return DataLoader(self.val_dataset, batch_size=self.batch_size, num_workers=self.num_workers, pin_memory=True, shuffle=False, drop_last=True)
 
 
 def main(args):

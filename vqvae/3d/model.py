@@ -21,21 +21,22 @@ from metrics.distribution import Logistic, mixture_nll_loss, generic_nll_loss
 baur_loss_f = BaurLoss3D(lambda_reconstruction=1)
 
 def _sub_metric_log_dict(sub_metric_name, sub_metric):
-    return {
-        f'{sub_metric_name}_{func_name}': func(sub_metric.detach())
-        for func_name, func in (
-            ('min', torch.min),
-            ('max', torch.max),
-            ('mean', torch.mean),
-            ('std', torch.std)
-        )
-    }
+    with torch.no_grad():
+        return {
+            f'{sub_metric_name}_{func_name}': func(sub_metric)
+            for func_name, func in (
+                ('min', torch.min),
+                ('max', torch.max),
+                ('mean', torch.mean),
+                ('std', torch.std)
+            )
+        }
 
 
 class VQVAE(pl.LightningModule):
 
     # first in line is the default
-    supported_metrics = ("mse", "normal_nll", "logistic_mixture_nll")
+    supported_metrics = ("mse", "rmse", "normal_nll", "logistic_mixture_nll")
 
     def __init__(self, args: Namespace):
 
@@ -71,33 +72,17 @@ class VQVAE(pl.LightningModule):
         return self.decoder(quantizations)
 
     def configure_optimizers(self):
-        base_lr, max_lr = 1e-5, 5e-3
-
-        train_loader = self.train_dataloader()
-        if self.use_ddp:
-            multiplier = train_loader.batch_size * len(self.trainer.gpus) * self.trainer.world_size / 2
-            base_lr *= multiplier
-            max_lr *= multiplier
-
-        optimizer = torch.optim.Adam(self.parameters(), lr=base_lr)
-        scheduler = torch.optim.lr_scheduler.CyclicLR(
-            optimizer,
-            base_lr=base_lr,
-            max_lr=max_lr,
-            step_size_up=5, # *2 as advised by CLR github
-            cycle_momentum=False
-        )
-
-        return [optimizer], [scheduler]
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.base_lr)
+        return optimizer
 
     def training_step(self, batch, batch_idx):
         return self.shared_step(batch, batch_idx, mode='train')
 
     def validation_step(self, batch, batch_idx):
-        return self.shared_step(batch, batch_idx, mode='validation')
+        return self.shared_step(batch, batch_idx, mode='val')
 
     def shared_step(self, batch, batch_idx, mode='train'):
-        assert mode in ('train', 'validation')
+        assert mode in ('train', 'val')
 
         loss, log_dict = self.recon_loss_f(batch, batch_idx)
 
@@ -106,7 +91,6 @@ class VQVAE(pl.LightningModule):
         else: # mode == 'validation'
             result = pl.EvalResult(checkpoint_on=loss)
 
-        # logging
         result.log_dict({f'{mode}_{key}': val for key, val in log_dict.items()})
 
         return result
@@ -127,12 +111,31 @@ class VQVAE(pl.LightningModule):
         return unreduced_loss.mean(), log_dict
 
     def mse(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
-        raise NotImplementedError
+        x, _ = batch
+
+        loc = F.softplus(self(x))
+        unreduced_loss = F.mse_loss(loc, x, reduction='none')
+
+        log_dict = {
+            **_sub_metric_log_dict('loss', unreduced_loss),
+            **_sub_metric_log_dict('loc', loc),
+        }
+
+        return unreduced_loss.mean(), log_dict
+
+    def rmse(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
+        mse, log_dict = self.mse(batch, batch_idx)
+
+        for key, value in log_dict.items():
+            if 'loss' in key:
+                log_dict[key] = value.sqrt()
+
+        return mse.sqrt(), log_dict
 
     def logistic_mixture_nll(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
         x, _ = batch
 
-        pi_k, loc, log_scale = torch.split(x, self.n_mix, dim=1)
+        pi_k, loc, log_scale = torch.split(x, self.input_channels*self.n_mix, dim=1)
         nll_loss = mixture_nll_loss(x, Logistic, self.n_mix, pi_k, loc=loc, scale=log_scale.exp(), reduce_sum=True)
 
         log_dict = {
@@ -153,13 +156,19 @@ class VQVAE(pl.LightningModule):
         elif args.metric == 'mse':
             self.recon_loss_f = self.mse
             out_multiplier = 1
+        elif args.metric == 'rmse':
+            self.recon_loss_f = self.rmse
+            out_multiplier = 1
         elif args.metric == 'logistic_mixture_nll':
             self.recon_loss_f = self.logistic_mixture_nll
             self.n_mix = args.n_mix
             out_multiplier = args.n_mix
 
-        self.output_channels = args.input_channels * out_multiplier
+        self.metric = args.metric
+        self.base_lr = args.base_lr
+
         self.input_channels = args.input_channels
+        self.output_channels = args.input_channels * out_multiplier
         self.base_network_channels = args.base_network_channels
         self.n_bottleneck_blocks = args.n_bottleneck_blocks
         self.n_blocks_per_bottleneck = args.n_blocks_per_bottleneck
@@ -175,15 +184,19 @@ class VQVAE(pl.LightningModule):
     def add_model_specific_args(cls, parent_parser):
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
 
+        # Model specific arguments
         parser.add_argument('--input-channels', type=int, default=1)
         parser.add_argument('--base-network_channels', type=int, default=4)
         parser.add_argument('--n-bottleneck-blocks', type=int, default=3)
         parser.add_argument('--n-blocks-per-bottleneck', type=int, default=2)
         parser.add_argument('--metric', choices=cls.supported_metrics, default=cls.supported_metrics[0])
 
-        # loss function specific arguments
+        # Optimizer specific arguments
+        parser.add_argument('--base_lr', default=1e-4)
+
+        # Loss function specific arguments
         # FIXME: put this is a class or something, at least not here
-        parser.add_argument('--n-mix', default=5)
+        parser.add_argument('--n-mix', default=2)
 
         return parser
 
@@ -318,6 +331,15 @@ class Decoder(nn.Module):
         return out
 
 
+class ResizeConv3D(nn.Conv3d):
+    def __init__(self, *conv_args, **conv_kwargs):
+        super(ResizeConv3D, self).__init__(*conv_args, **conv_kwargs)
+        self.upsample = nn.Upsample(mode='trilinear', scale_factor=2)
+
+    def forward(self, input):
+        return super(ResizeConv3D, self).forward(self.upsample(input))
+
+
 class FixupResBlock(torch.nn.Module):
     # Adapted from:
     # https://github.com/hongyi-zhang/Fixup/blob/master/imagenet/models/fixup_resnet_imagenet.py#L20
@@ -341,13 +363,13 @@ class FixupResBlock(torch.nn.Module):
 
         if mode == 'down':
             conv = nn.Conv3d
-            kernel_size, stride, padding = 3, 2, 1
+            kernel_size, stride, padding = 2, 2, 0
         elif mode in ('same', 'out'):
             conv = nn.Conv3d
             kernel_size, stride, padding = 3, 1, 1
         elif mode == 'up':
-            conv = nn.ConvTranspose3d
-            kernel_size, stride, padding = 4, 2, 1
+            conv = ResizeConv3D
+            kernel_size, stride, padding = 3, 1, 1
 
         self.branch_conv1, self.skip_conv = (
             conv(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
@@ -360,7 +382,7 @@ class FixupResBlock(torch.nn.Module):
             out_channels=out_channels,
             kernel_size=3,
             stride=1,
-            padding=padding,
+            padding=1,
             bias=False,
         )
 
@@ -503,8 +525,8 @@ class SubPixelConvolution3D(torch.nn.Module):
         self.conv = torch.nn.Conv3d(
             in_channels=in_channels,
             out_channels=out_channels * upsample_factor ** 3,
-            kernel_size=3,
-            padding=1,
+            kernel_size=2,
+            padding=0,
         )
 
         self.shuffle = PixelShuffle3D(
@@ -516,7 +538,6 @@ class SubPixelConvolution3D(torch.nn.Module):
     def forward(self, input):
         out = self.conv(input)
         out = self.shuffle(out)
-        out = self.nca(out)
         return out
 
     def initialize_weights(self):

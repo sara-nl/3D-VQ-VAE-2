@@ -110,7 +110,7 @@ def _fix_mixture_shapes(n_mix, mixture_comp_logits, **base_dist_kwargs):
         _, channel, *_ = values.shape
         assert channel == n_mix
         base_dist_kwargs[param] = values.permute(axes)
-    
+
     return mixture_comp_logits, base_dist_kwargs
 
 
