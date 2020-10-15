@@ -87,14 +87,9 @@ class VQVAE(pl.LightningModule):
 
         loss, log_dict = self.recon_loss_f(batch, batch_idx)
 
-        if mode == 'train':
-            result = pl.TrainResult(minimize=loss)
-        else: # mode == 'validation'
-            result = pl.EvalResult(checkpoint_on=loss)
+        self.log_dict({f'{mode}_{key}': val for key, val in log_dict.items()})
 
-        result.log_dict({f'{mode}_{key}': val for key, val in log_dict.items()})
-
-        return result
+        return loss
 
     def normal_nll(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
         x, _ = batch
