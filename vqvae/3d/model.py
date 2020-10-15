@@ -37,7 +37,7 @@ def _sub_metric_log_dict(sub_metric_name, sub_metric):
 class VQVAE(pl.LightningModule):
 
     # first in line is the default
-    supported_metrics = ("mse", "rmse", "mae", "huber", "normal_nll", "logistic_mixture_nll")
+    supported_metrics = ("mse", "rmse", "mae", "huber", "normal_nll", "logistic_mixture_nll", "normal_mixture_nll")
 
     def __init__(self, args: Namespace):
 
@@ -136,20 +136,28 @@ class VQVAE(pl.LightningModule):
     def huber(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
         return self.loc_metric(batch, batch_idx, F.smooth_l1_loss)
 
-    def logistic_mixture_nll(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
+    def loc_scale_mixture_nll(self, batch, batch_idx, loc_scale_dist) -> Tuple[torch.Tensor, dict]:
         x, _ = batch
 
-        pi_k, loc, log_scale = torch.split(x, self.input_channels*self.n_mix, dim=1)
-        nll_loss = mixture_nll_loss(x, Logistic, self.n_mix, pi_k, loc=loc, scale=log_scale.exp(), reduce_sum=True)
+        log_pi_k, loc, log_scale = torch.split(self(x), self.input_channels*self.n_mix, dim=1)
+        loc = F.softplus(loc)
+        log_scale = torch.max(log_scale, torch.Tensor([-7]).to(device=self.device)) # lower bound log_scale
+        unreduced_nll_loss = mixture_nll_loss(x, loc_scale_dist, self.n_mix, log_pi_k, loc=loc, scale=log_scale.exp(), reduce_sum=False)
 
         log_dict = {
-            **_sub_metric_log_dict('pi_k', pi_k),
+            **_sub_metric_log_dict('loss', unreduced_nll_loss),
+            **_sub_metric_log_dict('log_pi_k', log_pi_k),
             **_sub_metric_log_dict('loc', loc),
             **_sub_metric_log_dict('log_scale', log_scale),
         }
 
-        return nll_loss, log_dict
+        return unreduced_nll_loss.mean(), log_dict
 
+    def logistic_mixture_nll(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
+        return self.loc_scale_mixture_nll(batch, batch_idx, Logistic)
+
+    def normal_mixture_nll(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
+        return self.loc_scale_mixture_nll(batch, batch_idx, Normal)
 
     def _parse_input_args(self, args: Namespace):
         assert args.metric in self.supported_metrics
@@ -172,7 +180,11 @@ class VQVAE(pl.LightningModule):
         elif args.metric == 'logistic_mixture_nll':
             self.recon_loss_f = self.logistic_mixture_nll
             self.n_mix = args.n_mix
-            out_multiplier = args.n_mix
+            out_multiplier = args.n_mix * 3
+        elif args.metric == 'normal_mixture_nll':
+            self.recon_loss_f = self.normal_mixture_nll
+            self.n_mix = args.n_mix
+            out_multiplier = args.n_mix * 3
 
         self.metric = args.metric
         self.base_lr = args.base_lr
