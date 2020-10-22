@@ -37,7 +37,7 @@ def _sub_metric_log_dict(sub_metric_name, sub_metric):
 class VQVAE(pl.LightningModule):
 
     # first in line is the default
-    supported_metrics = ("mse", "rmse", "mae", "huber", "normal_nll", "logistic_mixture_nll", "normal_mixture_nll")
+    supported_metrics = ("mse", "rmse", "rmsle", "mae", "huber", "normal_nll", "logistic_mixture_nll", "normal_mixture_nll")
 
     def __init__(self, args: Namespace):
 
@@ -73,7 +73,7 @@ class VQVAE(pl.LightningModule):
         return self.decoder(quantizations)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.base_lr)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.base_lr, amsgrad=True)
         return optimizer
 
     def training_step(self, batch, batch_idx):
@@ -120,6 +120,19 @@ class VQVAE(pl.LightningModule):
 
     def mse(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
         return self.loc_metric(batch, batch_idx, F.mse_loss)
+
+    def rmsle(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
+        def sle_loss(pred, actual, reduction='none'):
+            assert reduction == 'none'
+            return (((pred + 1).log() - (actual + 1).log()) ** 2)
+
+        msle, log_dict = self.loc_metric(batch, batch_idx, sle_loss)
+
+        for key, value in log_dict.items():
+            if 'loss' in key:
+                log_dict[key] = value.sqrt()
+
+        return msle.sqrt(), log_dict
 
     def rmse(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
         mse, log_dict = self.mse(batch, batch_idx)
@@ -173,6 +186,9 @@ class VQVAE(pl.LightningModule):
             out_multiplier = 1
         elif args.metric == 'mae':
             self.recon_loss_f = self.mae
+            out_multiplier = 1
+        elif args.metric == 'rmsle':
+            self.recon_loss_f = self.rmsle
             out_multiplier = 1
         elif args.metric == 'huber':
             self.recon_loss_f = self.huber
@@ -229,7 +245,8 @@ class DownBlock(nn.Module):
         super(DownBlock, self).__init__()
 
         self.layers = nn.Sequential(*(
-            FixupResBlock(in_channels*2**i, in_channels*2**(i+1), mode='down') for i in range(n_down)
+            FixupResBlock(in_channels*2**i, in_channels*2**(i+1), mode='down')
+            for i in range(n_down)
         ))
 
     def forward(self, data):
@@ -241,12 +258,11 @@ class UpBlock(nn.Module):
         super(UpBlock, self).__init__()
 
         # Some slight shenanigans required for the first layer because of possible concat beforehand
-        self.layers = nn.Sequential(*(
-            FixupResBlock(
+        self.layers = nn.Sequential(*
+            (FixupResBlock(
                 in_channels if i == n_up-1 else out_channels*(2**(i+1)),
                 out_channels*(2**i),
-                mode='up'
-            )
+                mode='up')
             for i in range(n_up-1, -1, -1)
         ))
 
@@ -295,7 +311,7 @@ class Encoder(nn.Module):
                 n_up=n_down_per_enc
             ))
             self.quantize.append(
-                Quantizer(num_embeddings=256, embedding_dim=embedding_dim, commitment_cost=7)
+                Quantizer(num_embeddings=512, embedding_dim=embedding_dim, commitment_cost=7)
             )
 
             before_channels = after_channels
@@ -310,10 +326,15 @@ class Encoder(nn.Module):
         aux = None
         quantizations = []
         for down, pre_quantize, quantize in reversed(list(zip(downsampled, self.pre_quantize, self.quantize))):
-            quantization = quantize(pre_quantize(down, aux))
-            quantizations.append(quantization)
+            pre_quantizion = pre_quantize(down, aux)
 
+            quantization = (None, pre_quantizion, None, None, None)
+            # quantization = quantize(pre_quantizion)
+
+            quantizations.append(quantization)
             _, aux, _, _, _ = quantization
+
+
 
         return reversed(quantizations)
 
@@ -341,7 +362,10 @@ class Decoder(nn.Module):
 
             after_channels = before_channels
 
-        self.out = FixupResBlock(base_network_channels, out_channels, mode='out')
+        self.out = nn.Sequential(
+            FixupResBlock(base_network_channels, base_network_channels, mode='same'),
+            FixupResBlock(base_network_channels, out_channels, mode='out')
+        )
 
     def forward(self, quantizations):
         for i, (quantization, up) in enumerate(reversed(list(zip(quantizations, self.up)))):
@@ -385,18 +409,22 @@ class FixupResBlock(torch.nn.Module):
 
         if mode == 'down':
             conv = nn.Conv3d
-            kernel_size, stride, padding = 2, 2, 0
+            kernel_size, stride, padding = 4, 2, 1
         elif mode in ('same', 'out'):
             conv = nn.Conv3d
             kernel_size, stride, padding = 3, 1, 1
         elif mode == 'up':
-            conv = ResizeConv3D
-            kernel_size, stride, padding = 3, 1, 1
+            conv = nn.ConvTranspose3d
+            kernel_size, stride, padding = 4, 2, 1
 
-        self.branch_conv1, self.skip_conv = (
-            conv(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
-                 stride=stride, padding=padding, bias=False)
-            for _ in range(2)
+        self.branch_conv1 = conv(
+            in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
+            stride=stride, padding=padding, bias=False
+        )
+
+        self.skip_conv1 = conv(
+            in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
+            stride=stride, padding=padding, bias=True
         )
 
         self.branch_conv2 = torch.nn.Conv3d(
@@ -405,9 +433,17 @@ class FixupResBlock(torch.nn.Module):
             kernel_size=3,
             stride=1,
             padding=1,
-            bias=False,
+            bias=False
         )
 
+        self.skip_conv2 = torch.nn.Conv3d(
+            in_channels=out_channels,
+            out_channels=out_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=True
+        )
 
     def forward(self, input):
         out = self.branch_conv1(input + self.bias1a)
@@ -416,7 +452,7 @@ class FixupResBlock(torch.nn.Module):
         out = self.branch_conv2(out + self.bias2a)
         out = out * self.scale + self.bias2b
 
-        out += self.skip_conv(input + self.bias1a)
+        out += self.skip_conv2(self.skip_conv1(input)) # linear projection of the input onto the output
 
         if self.mode != 'out':
             out = self.activation(out)
@@ -434,17 +470,17 @@ class FixupResBlock(torch.nn.Module):
             * num_layers ** (-0.5),
         )
         torch.nn.init.constant_(tensor=self.branch_conv2.weight, val=0)
-        torch.nn.init.normal_(
-            tensor=self.skip_conv.weight,
-            mean=0,
-            std=np.sqrt(
-                2
-                / (
-                    self.skip_conv.weight.shape[0]
-                    * np.prod(self.skip_conv.weight.shape[2:])
-                )
-            ),
-        )
+        # torch.nn.init.normal_(
+        #     tensor=self.skip_conv.weight,
+        #     mean=0,
+        #     std=np.sqrt(
+        #         2
+        #         / (
+        #             self.skip_conv.weight.shape[0]
+        #             * np.prod(self.skip_conv.weight.shape[2:])
+        #         )
+        #     ),
+        # )
 
 
 class Quantizer(torch.nn.Module):

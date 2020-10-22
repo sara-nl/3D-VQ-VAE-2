@@ -36,12 +36,17 @@ def main(args: Namespace):
 
     res = torch.nn.functional.softplus(res)
     res =  res.squeeze().detach().cpu().numpy()
-    # from metrics.mixture_model import Logistic, sample_mixture
-    # pi_k, locs, log_scales = torch.split(out, n_mix, dim=1)
-    # res = sample_mixture(Logistic, n_mix, pi_k, greedy=True, loc=locs, scale=log_scales.exp()).squeeze().detach().cpu().numpy()
-    # res[res < 0] = 0
-    res[res > 4] = 4
 
+    # from metrics.distribution import Logistic, sample_mixture
+    # from torch.distributions.normal import Normal
+    # log_pi_k, locs, log_scales = torch.split(res, model.n_mix, dim=1)
+    # loc, scale = torch.nn.functional.softplus(locs), log_scales.exp()
+
+    # res = sample_mixture(Normal, model.n_mix, log_pi_k, greedy=True, loc=loc, scale=scale).squeeze().detach().cpu().numpy()
+    # # breakpoint()
+    # res[res < 0] = 0
+    # res[res > 4] = 4
+    breakpoint()
     nrrd.write(str(args.out_path), res)
 
 if __name__ == '__main__':

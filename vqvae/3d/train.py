@@ -63,11 +63,11 @@ class CTDataModule(pl.LightningDataModule):
 
 
 def main(args):
-    datamodule = CTDataModule(path=args.dataset_path, batch_size=args.batch_size, num_workers=5)
+    datamodule = CTDataModule(path=args.dataset_path, batch_size=args.batch_size, num_workers=6)
 
     model = VQVAE(args)
 
-    checkpoint_callback = pl.callbacks.model_checkpoint.ModelCheckpoint(save_last=True, save_top_k=3, monitor='val_loss_mean')
+    checkpoint_callback = pl.callbacks.ModelCheckpoint(save_last=True, save_top_k=3, monitor='val_loss_mean')
     lr_logger = pl.callbacks.LearningRateMonitor(logging_interval='step')
 
     trainer = pl.Trainer(
@@ -83,8 +83,11 @@ def main(args):
 
         checkpoint_callback=checkpoint_callback,
         log_every_n_steps=50,
-        val_check_interval=50,
+        val_check_interval=100,
         flush_logs_every_n_steps=100,
+        
+        # limit_val_batches=0,
+        # overfit_batches=1,
 
         callbacks=[lr_logger],
     )
