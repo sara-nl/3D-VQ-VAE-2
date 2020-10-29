@@ -3,6 +3,7 @@ from pathlib import Path
 
 import nrrd
 import torch
+import numpy as np
 from torch.utils.data import DataLoader
 from monai import transforms
 
@@ -35,8 +36,9 @@ def main(args: Namespace):
     res = model(single_sample)
 
     res = torch.nn.functional.softplus(res)
-    res =  res.squeeze().detach().cpu().numpy()
-
+    res = res.squeeze().detach().cpu().numpy()
+    res = res * -min_val + min_val
+    res = res.astype(np.int)
     # from metrics.distribution import Logistic, sample_mixture
     # from torch.distributions.normal import Normal
     # log_pi_k, locs, log_scales = torch.split(res, model.n_mix, dim=1)
@@ -46,8 +48,7 @@ def main(args: Namespace):
     # # breakpoint()
     # res[res < 0] = 0
     # res[res > 4] = 4
-    breakpoint()
-    nrrd.write(str(args.out_path), res)
+    nrrd.write(str(args.out_path), res, header={'spacings': (0.976, 0.976, 3)})
 
 if __name__ == '__main__':
     parser = ArgumentParser()
