@@ -155,3 +155,36 @@ def pairwise(iterable):
     a, b = tee(iterable)
     next(b, None)
     return zip(a, b)
+
+
+class ExtractCenterCylinder(torch.nn.Module):
+    def __init__(self, size: Union[Tuple[int, int], None] = None, cache_mask: bool = True):
+        super(ExtractCenterCylinder, self).__init__()
+        self.mask = self.create_cylinder_xy_mask(size) if size else None
+        self.cache_mask = cache_mask
+
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        *_, x, y, _ = tensor.shape
+
+        if self.mask is not None:
+            mask = self.mask
+        else:
+            mask = self.create_cylinder_xy_mask((x, y))
+            if self.cache_mask:
+                self.mask = mask
+
+        return tensor[..., mask, :]
+
+    @staticmethod
+    def create_cylinder_xy_mask(size: Tuple[int, int]) -> torch.Tensor:
+        x_size, y_size = size
+
+        radius = min(x_size, y_size) / 2
+        x_center, y_center = x_size / 2, y_size / 2
+
+        x, y = np.ogrid[:x_size, :y_size]
+        dist_from_center = np.sqrt((x - x_center)**2 + (y-y_center)**2)
+
+        mask = dist_from_center <= radius
+
+        return torch.BoolTensor(mask)

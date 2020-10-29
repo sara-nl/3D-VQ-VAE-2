@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from torch.distributions.normal import Normal
 from torch import nn
 
+from utils import ExtractCenterCylinder
 from metrics.ssim import ssim3D
 from metrics.baur import BaurLoss3D
 from metrics.distribution import Logistic, mixture_nll_loss, generic_nll_loss
@@ -73,7 +74,7 @@ class VQVAE(pl.LightningModule):
         return self.decoder(quantizations)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.base_lr, amsgrad=True)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, amsgrad=True)
         return optimizer
 
     def training_step(self, batch, batch_idx):
@@ -110,6 +111,10 @@ class VQVAE(pl.LightningModule):
         x, _ = batch
 
         loc = F.softplus(self(x))
+
+        if self.pre_loss_f:
+            loc, x = map(self.pre_loss_f, (loc, x))
+
         unreduced_loss = loss_f(loc, x, reduction='none')
 
         log_dict = {
@@ -155,6 +160,11 @@ class VQVAE(pl.LightningModule):
         log_pi_k, loc, log_scale = torch.split(self(x), self.input_channels*self.n_mix, dim=1)
         loc = F.softplus(loc)
         log_scale = torch.max(log_scale, torch.Tensor([-7]).to(device=self.device)) # lower bound log_scale
+
+        # XXX: these two lines below are untested
+        if self.pre_loss_f:
+            log_pi_k, loc, log_scale, x = map(self.pre_loss_f, (log_pi_k, loc, log_scale, x))
+
         unreduced_nll_loss = mixture_nll_loss(x, loc_scale_dist, self.n_mix, log_pi_k, loc=loc, scale=log_scale.exp(), reduce_sum=False)
 
         log_dict = {
@@ -203,7 +213,7 @@ class VQVAE(pl.LightningModule):
             out_multiplier = args.n_mix * 3
 
         self.metric = args.metric
-        self.base_lr = args.base_lr
+        self.lr = args.base_lr
 
         self.input_channels = args.input_channels
         self.output_channels = args.input_channels * out_multiplier
@@ -217,6 +227,8 @@ class VQVAE(pl.LightningModule):
             + (2 * args.n_bottleneck_blocks)
         )
 
+        self.pre_loss_f = ExtractCenterCylinder() if not args.no_extract_center_cylinder else None
+
 
     @classmethod
     def add_model_specific_args(cls, parent_parser):
@@ -227,10 +239,13 @@ class VQVAE(pl.LightningModule):
         parser.add_argument('--base-network_channels', type=int, default=4)
         parser.add_argument('--n-bottleneck-blocks', type=int, default=3)
         parser.add_argument('--n-blocks-per-bottleneck', type=int, default=2)
+
+        # loss calculation specific
+        parser.add_argument('--no-extract-center-cylinder', action='store_false')
         parser.add_argument('--metric', choices=cls.supported_metrics, default=cls.supported_metrics[0])
 
         # Optimizer specific arguments
-        parser.add_argument('--base_lr', default=1e-4)
+        parser.add_argument('--base_lr', default=1e-5, type=float)
 
         # Loss function specific arguments
         # FIXME: put this is a class or something, at least not here
@@ -364,7 +379,11 @@ class Decoder(nn.Module):
 
         self.out = nn.Sequential(
             FixupResBlock(base_network_channels, base_network_channels, mode='same'),
-            FixupResBlock(base_network_channels, out_channels, mode='out')
+            FixupResBlock(base_network_channels, out_channels, mode='out'),
+
+            # FixupResBlock(base_network_channels, base_network_channels, mode='same'),
+            # FixupResBlock(base_network_channels, base_network_channels, mode='out'),
+            # nn.ConvTranspose3d(in_channels=base_network_channels, out_channels=out_channels, kernel_size1=1, stride=1)
         )
 
     def forward(self, quantizations):
