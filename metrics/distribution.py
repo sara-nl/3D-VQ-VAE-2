@@ -80,6 +80,10 @@ def sample_mixture(
         mixture_distribution=pi_k,
         component_distribution=dists,
     )
+    # max_loc_idx = mixture_model.log_prob(base_dist_kwargs['loc'].transpose(0,-1).squeeze()).max(dim=0)[1]
+    # bool_mask = torch.nn.functional.one_hot(max_loc_idx).to(torch.bool)
+    # locs = base_dist_kwargs['loc'].squeeze()[bool_mask].reshape(512,512,128)
+    # return locs
     return mixture_model.sample()
 
 
