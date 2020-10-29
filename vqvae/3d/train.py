@@ -1,5 +1,7 @@
+import os
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
+from typing import Union, Tuple
 
 import torch
 import pytorch_lightning as pl
@@ -63,9 +65,13 @@ class CTDataModule(pl.LightningDataModule):
 
 
 def main(args):
+    pl.trainer.seed_everything(seed=42)
+
     datamodule = CTDataModule(path=args.dataset_path, batch_size=args.batch_size, num_workers=6)
 
     model = VQVAE(args)
+    if args.checkpoint_path != '':
+        model = model.load_from_checkpoint(args.checkpoint_path)
 
     checkpoint_callback = pl.callbacks.ModelCheckpoint(save_last=True, save_top_k=3, monitor='val_loss_mean')
     lr_logger = pl.callbacks.LearningRateMonitor(logging_interval='step')
@@ -75,6 +81,9 @@ def main(args):
         auto_select_gpus=True,
         distributed_backend='ddp',
         benchmark=True,
+        num_nodes=args.num_nodes,
+
+        accumulate_grad_batches=args.accumulate_grad_batches,
 
         max_epochs=200,
         terminate_on_nan=True,
@@ -85,7 +94,8 @@ def main(args):
         log_every_n_steps=50,
         val_check_interval=100,
         flush_logs_every_n_steps=100,
-        
+        weights_summary='full',
+
         # limit_val_batches=0,
         # overfit_batches=1,
 
@@ -102,6 +112,7 @@ if __name__ == '__main__':
     parser = VQVAE.add_model_specific_args(parser)
 
     parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--checkpoint-path", default='')
     parser.add_argument("dataset_path", type=Path)
 
     args = parser.parse_args()
