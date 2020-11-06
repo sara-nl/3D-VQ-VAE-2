@@ -12,17 +12,17 @@ from utils import CTScanDataset
 
 
 def main(args: Namespace):
-    key, min_val, max_val = 'img', -1000, 3000
+
+    key, min_val, max_val, scale_val = 'img', -1500, 3000, 1000
 
     transform = transforms.Compose([
         transforms.AddChannel(),
         transforms.ThresholdIntensity(threshold=max_val, cval=max_val, above=False),
         transforms.ThresholdIntensity(threshold=min_val, cval=min_val, above=True),
-        transforms.ScaleIntensity(minv=None, maxv=None, factor=(-1 - 1/min_val)),
+        transforms.ScaleIntensity(minv=None, maxv=None, factor=(-1 + 1/scale_val)),
         transforms.ShiftIntensity(offset=1),
         transforms.SpatialPad(spatial_size=(512, 512, 128), mode='constant'),
-        transforms.RandSpatialCrop(roi_size=(512, 512, 128), random_size=False),
-        # transforms.Resize(spatial_size=(256, 256, 64)),
+        transforms.SpatialCrop(roi_size=(512, 512, 128), roi_center=(256, 256,64)),
         transforms.ToTensor()
     ])
 
@@ -37,7 +37,7 @@ def main(args: Namespace):
 
     res = torch.nn.functional.softplus(res)
     res = res.squeeze().detach().cpu().numpy()
-    res = res * -min_val + min_val
+    res = res * scale_val - scale_val
     res = res.astype(np.int)
     # from metrics.distribution import Logistic, sample_mixture
     # from torch.distributions.normal import Normal
