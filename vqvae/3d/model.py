@@ -2,9 +2,11 @@
 This is largely a refactor of https://github.com/danieltudosiu/nmpevqvae
 """
 
-from itertools import zip_longest
+from itertools import zip_longest, chain
+from functools import partial
 from typing import Tuple
 from argparse import ArgumentParser, Namespace
+from math import prod
 
 import numpy as np
 import pytorch_lightning as pl
@@ -13,13 +15,12 @@ import torch.nn.functional as F
 from torch.distributions.normal import Normal
 from torch import nn
 
-from metrics.ssim import ssim3D
-from metrics.baur import BaurLoss3D
+from utils import ExtractCenterCylinder
 from metrics.distribution import Logistic, mixture_nll_loss, generic_nll_loss
+from metrics.evaluate import nmse, psnr, ssim3d
 
 
-baur_loss_f = BaurLoss3D(lambda_reconstruction=1)
-
+@torch.no_grad()
 def _sub_metric_log_dict(sub_metric_name, sub_metric):
     with torch.no_grad():
         return {
@@ -32,6 +33,23 @@ def _sub_metric_log_dict(sub_metric_name, sub_metric):
                 ('std', torch.std)
             )
         }
+
+@torch.no_grad()
+def _eval_metrics_log_dict(orig, pred):
+    # FIXME: remove hardcoded data range
+    metrics = (
+        ('nmse', nmse),
+        ('psnr', partial(psnr, data_range=4)),
+    )
+    return {
+        func_name: func(orig, pred)
+        for func_name, func in metrics
+    }
+
+@torch.no_grad()
+def _eval_ssim3d(orig, pred):
+    '''SSIM needs to be seperate because of spatial dimensions'''
+    return {'ssim3d': ssim3d(orig, pred)}
 
 
 class VQVAE(pl.LightningModule):
@@ -73,7 +91,7 @@ class VQVAE(pl.LightningModule):
         return self.decoder(quantizations)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.base_lr, amsgrad=True)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, amsgrad=True)
         return optimizer
 
     def training_step(self, batch, batch_idx):
@@ -96,6 +114,10 @@ class VQVAE(pl.LightningModule):
 
         loc, log_scale = torch.split(self(x), self.input_channels, dim=1)
         log_scale = torch.max(log_scale, torch.Tensor([-7]).to(device=self.device)) # lower bound log_scale
+
+        if self.pre_loss_f:
+            loc, log_scale, x = map(self.pre_loss_f, (loc, log_scale, x))
+
         unreduced_loss = generic_nll_loss(x, Normal, loc=loc, scale=log_scale.exp(), reduce_sum=False)
 
         log_dict = {
@@ -110,12 +132,22 @@ class VQVAE(pl.LightningModule):
         x, _ = batch
 
         loc = F.softplus(self(x))
+
+        # before cylinder extraction because that flattens xy dimensions
+        eval_ssim_dict = _eval_ssim3d(x, loc)
+
+        if self.pre_loss_f:
+            loc, x = map(self.pre_loss_f, (loc, x))
+
         unreduced_loss = loss_f(loc, x, reduction='none')
 
         log_dict = {
             **_sub_metric_log_dict('loss', unreduced_loss),
             **_sub_metric_log_dict('loc', loc),
+            **_eval_metrics_log_dict(orig=x, pred=loc),
+            **eval_ssim_dict
         }
+
         return unreduced_loss.mean(), log_dict
 
     def mse(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
@@ -155,6 +187,11 @@ class VQVAE(pl.LightningModule):
         log_pi_k, loc, log_scale = torch.split(self(x), self.input_channels*self.n_mix, dim=1)
         loc = F.softplus(loc)
         log_scale = torch.max(log_scale, torch.Tensor([-7]).to(device=self.device)) # lower bound log_scale
+
+        # XXX: these two lines below are untested
+        if self.pre_loss_f:
+            log_pi_k, loc, log_scale, x = map(self.pre_loss_f, (log_pi_k, loc, log_scale, x))
+
         unreduced_nll_loss = mixture_nll_loss(x, loc_scale_dist, self.n_mix, log_pi_k, loc=loc, scale=log_scale.exp(), reduce_sum=False)
 
         log_dict = {
@@ -203,7 +240,7 @@ class VQVAE(pl.LightningModule):
             out_multiplier = args.n_mix * 3
 
         self.metric = args.metric
-        self.base_lr = args.base_lr
+        self.lr = args.base_lr
 
         self.input_channels = args.input_channels
         self.output_channels = args.input_channels * out_multiplier
@@ -217,6 +254,8 @@ class VQVAE(pl.LightningModule):
             + (2 * args.n_bottleneck_blocks)
         )
 
+        self.pre_loss_f = ExtractCenterCylinder() if args.extract_center_cylinder else None
+
 
     @classmethod
     def add_model_specific_args(cls, parent_parser):
@@ -227,10 +266,13 @@ class VQVAE(pl.LightningModule):
         parser.add_argument('--base-network_channels', type=int, default=4)
         parser.add_argument('--n-bottleneck-blocks', type=int, default=3)
         parser.add_argument('--n-blocks-per-bottleneck', type=int, default=2)
+
+        # loss calculation specific
+        parser.add_argument('--extract-center-cylinder', type=bool, default=True)
         parser.add_argument('--metric', choices=cls.supported_metrics, default=cls.supported_metrics[0])
 
         # Optimizer specific arguments
-        parser.add_argument('--base_lr', default=1e-4)
+        parser.add_argument('--base_lr', default=1e-5, type=float)
 
         # Loss function specific arguments
         # FIXME: put this is a class or something, at least not here
@@ -254,17 +296,26 @@ class DownBlock(nn.Module):
 
 
 class UpBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, aux_channels=0, n_up=2):
+    def __init__(self, in_channels, out_channels, aux_channels=0, n_up=2, mode='encoder'):
         super(UpBlock, self).__init__()
 
-        # Some slight shenanigans required for the first layer because of possible concat beforehand
-        self.layers = nn.Sequential(*
+        assert mode in ('encoder', 'decoder')
+
+        # Some slight channel size shenanigans required for the first layer because of possible concat beforehand
+        self.layers = nn.Sequential(*filter(None, chain.from_iterable(
             (FixupResBlock(
                 in_channels if i == n_up-1 else out_channels*(2**(i+1)),
                 out_channels*(2**i),
-                mode='up')
+                mode='up'
+             ),
+             FixupResBlock(
+                out_channels*(2**i),
+                out_channels*(2**i),
+                mode='same'
+             ) if mode == 'decoder' else None
+            )
             for i in range(n_up-1, -1, -1)
-        ))
+        ))) # Like I'm programming lisp or something
 
     def forward(self, data):
         return self.layers(data)
@@ -357,14 +408,15 @@ class Decoder(nn.Module):
             self.up.append(UpBlock(
                 in_channels=in_channels,
                 out_channels=after_channels,
-                n_up=n_up_per_enc
+                n_up=n_up_per_enc,
+                mode='decoder'
             ))
 
             after_channels = before_channels
 
         self.out = nn.Sequential(
             FixupResBlock(base_network_channels, base_network_channels, mode='same'),
-            FixupResBlock(base_network_channels, out_channels, mode='out')
+            FixupResBlock(base_network_channels, out_channels, mode='out'),
         )
 
     def forward(self, quantizations):
@@ -414,8 +466,8 @@ class FixupResBlock(torch.nn.Module):
             conv = nn.Conv3d
             kernel_size, stride, padding = 3, 1, 1
         elif mode == 'up':
-            conv = nn.ConvTranspose3d
-            kernel_size, stride, padding = 4, 2, 1
+            conv = ResizeConv3D
+            kernel_size, stride, padding = 3, 1, 1
 
         self.branch_conv1 = conv(
             in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
@@ -436,14 +488,6 @@ class FixupResBlock(torch.nn.Module):
             bias=False
         )
 
-        self.skip_conv2 = torch.nn.Conv3d(
-            in_channels=out_channels,
-            out_channels=out_channels,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-            bias=True
-        )
 
     def forward(self, input):
         out = self.branch_conv1(input + self.bias1a)
@@ -452,7 +496,7 @@ class FixupResBlock(torch.nn.Module):
         out = self.branch_conv2(out + self.bias2a)
         out = out * self.scale + self.bias2b
 
-        out += self.skip_conv2(self.skip_conv1(input)) # linear projection of the input onto the output
+        out += self.skip_conv1(input) # linear projection of the input onto the output
 
         if self.mode != 'out':
             out = self.activation(out)
@@ -461,26 +505,12 @@ class FixupResBlock(torch.nn.Module):
 
     def initialize_weights(self, num_layers):
 
-        torch.nn.init.normal_(
-            tensor=self.branch_conv1.weight,
-            mean=0,
-            std=np.sqrt(
-                2 / (self.branch_conv1.weight.shape[0] * np.prod(self.branch_conv1.weight.shape[2:]))
-            )
-            * num_layers ** (-0.5),
-        )
+        torch.nn.init.kaiming_normal_(self.branch_conv1.weight, nonlinearity='leaky_relu')
+
         torch.nn.init.constant_(tensor=self.branch_conv2.weight, val=0)
-        # torch.nn.init.normal_(
-        #     tensor=self.skip_conv.weight,
-        #     mean=0,
-        #     std=np.sqrt(
-        #         2
-        #         / (
-        #             self.skip_conv.weight.shape[0]
-        #             * np.prod(self.skip_conv.weight.shape[2:])
-        #         )
-        #     ),
-        # )
+
+        torch.nn.init.kaiming_normal_(self.skip_conv1.weight)
+        torch.nn.init.constant_(tensor=self.skip_conv1.bias, val=0)
 
 
 class Quantizer(torch.nn.Module):
@@ -575,7 +605,7 @@ class Quantizer(torch.nn.Module):
 
 
 class SubPixelConvolution3D(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, upsample_factor=2):
+    def __init__(self, in_channels, out_channels, upsample_factor=2, **conv_kwargs):
         super(SubPixelConvolution3D, self).__init__()
         assert upsample_factor == 2
         self.upsample_factor = upsample_factor
@@ -583,8 +613,7 @@ class SubPixelConvolution3D(torch.nn.Module):
         self.conv = torch.nn.Conv3d(
             in_channels=in_channels,
             out_channels=out_channels * upsample_factor ** 3,
-            kernel_size=2,
-            padding=0,
+            **conv_kwargs
         )
 
         self.shuffle = PixelShuffle3D(

@@ -26,13 +26,13 @@ class CTDataModule(pl.LightningDataModule):
 
     def setup(self, stage=None):
         # transform
-        key, min_val, max_val = 'img', -1000, 3000
+        key, min_val, max_val, scale_val = 'img', -1500, 3000, 1000
 
         transform = transforms.Compose([
             transforms.AddChannel(),
             transforms.ThresholdIntensity(threshold=max_val, cval=max_val, above=False),
             transforms.ThresholdIntensity(threshold=min_val, cval=min_val, above=True),
-            transforms.ScaleIntensity(minv=None, maxv=None, factor=(-1 - 1/min_val)),
+            transforms.ScaleIntensity(minv=None, maxv=None, factor=(-1 + 1/scale_val)),
             transforms.ShiftIntensity(offset=1),
             transforms.SpatialPad(spatial_size=(512, 512, 128), mode='constant'),
             transforms.RandSpatialCrop(roi_size=(512, 512, 128), random_size=False),
@@ -85,7 +85,6 @@ def main(args):
 
         accumulate_grad_batches=args.accumulate_grad_batches,
 
-        max_epochs=200,
         terminate_on_nan=True,
 
         profiler=None,

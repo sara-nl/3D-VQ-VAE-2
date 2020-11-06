@@ -1,15 +1,15 @@
 #!/bin/bash
 
-#SBATCH -N 2
+#SBATCH -N 4
 #SBATCH --tasks-per-node 4
-#SBATCH -t 2-00:00:00
+#SBATCH -t 5-00:00:00
 #SBATCH -p gpu_titanrtx
 export OMP_NUM_THREADS=6
 
 DATASET_NAME="14"
 CONDA_ENV="pytorch1.6"
 
-METRIC="rmsle" # options ("mse", "rmse", "mae", "huber", "normal_nll", "logistic_mixture_nll")
+METRIC="huber" # options ("mse", "rmse", "mae", "huber", "normal_nll", "logistic_mixture_nll")
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 if [[ $SCRIPT_DIR == *"/var/spool/"* ]] && [ ! -z $SLURM_JOB_ID ]; then
@@ -26,11 +26,6 @@ DATASET_PATH="$ROOT_DIR"/datasets/"$DATASET_NAME"
 if [ ! -z $SLURM_JOB_NODELIST ]; then
     NODES=( $( scontrol show hostnames "$SLURM_JOB_NODELIST" | head ) )
     NUM_NODES="${#NODES[@]}"
-
-    # MASTER_PORT=5001
-    # MASTER_ADDR=$( scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1 )
-    # WORLD_SIZE=$(( $NUM_NODES * 4 ))
-
 else
     NUM_NODES="1"
 fi
@@ -85,7 +80,6 @@ echo "- found args $PYTHON_ARGS"
 
 if (( $NUM_NODES > 1 )); then
     echo "- multi-node setup"
-    # echo "- master addr set to $MASTER_ADDR, master port set to $MASTER_PORT, world size $WORLD_SIZE"
     echo "- copying dataset"
     mpicopy "$DATASET_PATH" -o $INDIR
     echo "- untarring dataset"
@@ -99,6 +93,6 @@ else
     echo "- untarring dataset"
     tar -xkf "$INDIR"/"$DATASET_NAME".tar -C "$INDIR"
     echo "- starting run"
-    python "$SCRIPTPATH" $PYTHON_ARGS
+    python -m pdb "$SCRIPTPATH" $PYTHON_ARGS
 fi
 
