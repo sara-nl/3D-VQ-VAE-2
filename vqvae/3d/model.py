@@ -133,7 +133,7 @@ class VQVAE(pl.LightningModule):
 
         loc = F.softplus(self(x))
 
-        # before cylinder extraction because that flattens xy dimensions
+        # ssim before cylinder extraction because that flattens xy dimensions
         eval_ssim_dict = _eval_ssim3d(x, loc)
 
         if self.pre_loss_f:

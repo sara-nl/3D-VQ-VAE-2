@@ -20,6 +20,7 @@ def compute_scan_data_marginal(scan_paths, n_id=5000, ignore_min=-1024, mask=Tru
 
     for i, scan_path in enumerate(tqdm(Path(scan_paths).glob("**/*.nrrd"))):
         scan = nrrd.read(scan_path)[0]
+
         *_, x, y, _ = scan.shape
 
         if x != 512:
