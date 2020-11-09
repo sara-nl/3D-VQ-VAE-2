@@ -36,6 +36,7 @@ class CTDataModule(pl.LightningDataModule):
             transforms.ShiftIntensity(offset=1),
             transforms.SpatialPad(spatial_size=(512, 512, 128), mode='constant'),
             transforms.RandSpatialCrop(roi_size=(512, 512, 128), random_size=False),
+            # transforms.Resize(spatial_size=(256, 256, 128)),
             transforms.ToTensor()
         ])
 
@@ -70,8 +71,6 @@ def main(args):
     datamodule = CTDataModule(path=args.dataset_path, batch_size=args.batch_size, num_workers=6)
 
     model = VQVAE(args)
-    if args.checkpoint_path != '':
-        model = model.load_from_checkpoint(args.checkpoint_path)
 
     checkpoint_callback = pl.callbacks.ModelCheckpoint(save_last=True, save_top_k=3, monitor='val_loss_mean')
     lr_logger = pl.callbacks.LearningRateMonitor(logging_interval='step')
@@ -83,15 +82,19 @@ def main(args):
         benchmark=True,
         num_nodes=args.num_nodes,
 
+        num_sanity_val_steps=0,
+        precision=16,
+
         accumulate_grad_batches=args.accumulate_grad_batches,
 
         terminate_on_nan=True,
 
         profiler=None,
 
+        resume_from_checkpoint=args.checkpoint_path,
         checkpoint_callback=checkpoint_callback,
         log_every_n_steps=50,
-        val_check_interval=100,
+        val_check_interval=0.5,
         flush_logs_every_n_steps=100,
         weights_summary='full',
 
@@ -111,7 +114,7 @@ if __name__ == '__main__':
     parser = VQVAE.add_model_specific_args(parser)
 
     parser.add_argument("--batch-size", type=int)
-    parser.add_argument("--checkpoint-path", default='')
+    parser.add_argument("--checkpoint-path", default=None)
     parser.add_argument("dataset_path", type=Path)
 
     args = parser.parse_args()

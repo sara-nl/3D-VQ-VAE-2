@@ -20,7 +20,7 @@ __all__ = (
 
 def nmse(orig: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:
     """ Compute Normalized Mean Squared Error (NMSE) """
-    return F.mse_loss(pred, orig) / torch.norm(orig) ** 2
+    return torch.norm(pred, orig) ** 2 / torch.norm(orig) ** 2
 
 def psnr(orig: torch.Tensor, pred: torch.Tensor, data_range: float) -> torch.Tensor:
     return 10 * torch.log10((data_range ** 2) / F.mse_loss(pred, orig))
@@ -32,7 +32,6 @@ def ssim3d(img1: torch.Tensor, img2: torch.Tensor, window_size: int = 11, size_a
     
     return _ssim_3D(img1, img2, window, window_size, channel, size_average)
 
-@lru_cache(maxsize=1)
 def _gaussian(window_size: int, sigma: float) -> torch.Tensor:
     gauss = torch.exp(-0.5 * ((torch.arange(window_size) - window_size // 2) / sigma) ** 2)
     return gauss/gauss.sum()

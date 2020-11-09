@@ -312,6 +312,11 @@ class UpBlock(nn.Module):
                 out_channels*(2**i),
                 out_channels*(2**i),
                 mode='same'
+             ) if mode == 'decoder' else None,
+             FixupResBlock(
+                out_channels*(2**i),
+                out_channels*(2**i),
+                mode='same'
              ) if mode == 'decoder' else None
             )
             for i in range(n_up-1, -1, -1)
@@ -362,17 +367,15 @@ class Encoder(nn.Module):
                 n_up=n_down_per_enc
             ))
             self.quantize.append(
-                Quantizer(num_embeddings=512, embedding_dim=embedding_dim, commitment_cost=7)
+                Quantizer(num_embeddings=256, embedding_dim=embedding_dim, commitment_cost=7)
             )
 
             before_channels = after_channels
 
 
     def forward(self, data):
-        preprocessed = self.parse_input(data)
-
-        down = preprocessed
-        downsampled = [(down := downblock(down)) for downblock in self.down]
+        down = self.parse_input(data)
+        downsampled = ((down := downblock(down)) for downblock in self.down)
 
         aux = None
         quantizations = []
@@ -384,8 +387,6 @@ class Encoder(nn.Module):
 
             quantizations.append(quantization)
             _, aux, _, _, _ = quantization
-
-
 
         return reversed(quantizations)
 
@@ -414,10 +415,11 @@ class Decoder(nn.Module):
 
             after_channels = before_channels
 
-        self.out = nn.Sequential(
-            FixupResBlock(base_network_channels, base_network_channels, mode='same'),
-            FixupResBlock(base_network_channels, out_channels, mode='out'),
-        )
+        # self.out = nn.Sequential(
+        #     # FixupResBlock(base_network_channels, base_network_channels, mode='same'),
+        #     FixupResBlock(base_network_channels, out_channels, mode='out'),
+        # )
+        self.out = FixupResBlock(base_network_channels, out_channels, mode='out')
 
     def forward(self, quantizations):
         for i, (quantization, up) in enumerate(reversed(list(zip(quantizations, self.up)))):
@@ -442,11 +444,7 @@ class FixupResBlock(torch.nn.Module):
     # Adapted from:
     # https://github.com/hongyi-zhang/Fixup/blob/master/imagenet/models/fixup_resnet_imagenet.py#L20
 
-    """
-    FIXME: check wether the biases should be a single scalar or a vector
-    """
-
-    def __init__(self, in_channels, out_channels, mode, activation=nn.LeakyReLU):
+    def __init__(self, in_channels, out_channels, mode, activation=nn.ELU):
         super(FixupResBlock, self).__init__()
 
         assert mode in ("down", "same", "up", "out")
@@ -475,8 +473,10 @@ class FixupResBlock(torch.nn.Module):
         )
 
         self.skip_conv1 = conv(
-            in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
-            stride=stride, padding=padding, bias=True
+            in_channels=in_channels, out_channels=out_channels, bias=True,
+            kernel_size=(1 if mode != 'down' else 2),
+            stride=(1 if mode != 'down' else 2), 
+            padding=(0 if mode != 'down' else 0), 
         )
 
         self.branch_conv2 = torch.nn.Conv3d(
