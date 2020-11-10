@@ -416,7 +416,7 @@ class Decoder(nn.Module):
             after_channels = before_channels
 
         # self.out = nn.Sequential(
-        #     # FixupResBlock(base_network_channels, base_network_channels, mode='same'),
+        #     FixupResBlock(base_network_channels, base_network_channels, mode='same'),
         #     FixupResBlock(base_network_channels, out_channels, mode='out'),
         # )
         self.out = FixupResBlock(base_network_channels, out_channels, mode='out')
@@ -475,8 +475,8 @@ class FixupResBlock(torch.nn.Module):
         self.skip_conv1 = conv(
             in_channels=in_channels, out_channels=out_channels, bias=True,
             kernel_size=(1 if mode != 'down' else 2),
-            stride=(1 if mode != 'down' else 2), 
-            padding=(0 if mode != 'down' else 0), 
+            stride=(1 if mode != 'down' else 2),
+            padding=(0 if mode != 'down' else 0),
         )
 
         self.branch_conv2 = torch.nn.Conv3d(
@@ -505,7 +505,7 @@ class FixupResBlock(torch.nn.Module):
 
     def initialize_weights(self, num_layers):
 
-        torch.nn.init.kaiming_normal_(self.branch_conv1.weight, nonlinearity='leaky_relu')
+        torch.nn.init.kaiming_normal_(self.branch_conv1.weight)
 
         torch.nn.init.constant_(tensor=self.branch_conv2.weight, val=0)
 
