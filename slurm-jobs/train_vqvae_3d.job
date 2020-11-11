@@ -81,9 +81,9 @@ echo "- found args $PYTHON_ARGS"
 if (( $NUM_NODES > 1 )); then
     echo "- multi-node setup"
     echo "- copying dataset"
-    mpicopy "$DATASET_PATH" -o $INDIR
+    mpicopy -v "$DATASET_PATH" -o $INDIR
     echo "- untarring dataset"
-    srun -N $NUM_NODES -n $NUM_NODES tar -xkf "$INDIR"/"$DATASET_NAME".tar -C "$INDIR"
+    srun -n $NUM_NODES --tasks-per-node=1 tar -xkf "$INDIR"/"$DATASET_NAME".tar -C "$INDIR"
     echo "- starting run"
     srun python "$SCRIPTPATH" $PYTHON_ARGS
 else
@@ -93,6 +93,6 @@ else
     echo "- untarring dataset"
     tar -xkf "$INDIR"/"$DATASET_NAME".tar -C "$INDIR"
     echo "- starting run"
-    python -m pdb "$SCRIPTPATH" $PYTHON_ARGS
+    python "$SCRIPTPATH" $PYTHON_ARGS
 fi
 

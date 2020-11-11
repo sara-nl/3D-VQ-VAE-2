@@ -22,32 +22,31 @@ def main(args: Namespace):
         transforms.ScaleIntensity(minv=None, maxv=None, factor=(-1 + 1/scale_val)),
         transforms.ShiftIntensity(offset=1),
         transforms.SpatialPad(spatial_size=(512, 512, 128), mode='constant'),
-        transforms.SpatialCrop(roi_size=(512, 512, 128), roi_center=(256, 256,64)),
+        transforms.SpatialCrop(roi_size=(512, 512, 128), roi_center=(256, 256, 64)),
+        # transforms.Resize(spatial_size=(256, 256, 128)),
         transforms.ToTensor()
     ])
 
     dataset = CTScanDataset(args.dataset_path, transform=transform, spacing=(0.976, 0.976, 3))
     train_loader = DataLoader(dataset, batch_size=1, num_workers=0, pin_memory=True)
 
+    print("- Loading single CT sample")
     single_sample, _ = next(iter(train_loader))
     single_sample = single_sample.cuda()
 
+    print("- Loading model weights")
     model = VQVAE.load_from_checkpoint(str(args.ckpt_path)).cuda()
-    res = model(single_sample)
 
-    res = torch.nn.functional.softplus(res)
+    print("- Performing forward pass")
+    with torch.no_grad(), torch.cuda.amp.autocast():
+        res = model(single_sample)
+        res = torch.nn.functional.softplus(res)
+
     res = res.squeeze().detach().cpu().numpy()
     res = res * scale_val - scale_val
-    res = res.astype(np.int)
-    # from metrics.distribution import Logistic, sample_mixture
-    # from torch.distributions.normal import Normal
-    # log_pi_k, locs, log_scales = torch.split(res, model.n_mix, dim=1)
-    # loc, scale = torch.nn.functional.softplus(locs), log_scales.exp()
+    res = np.rint(res).astype(np.int)
 
-    # res = sample_mixture(Normal, model.n_mix, log_pi_k, greedy=True, loc=loc, scale=scale).squeeze().detach().cpu().numpy()
-    # # breakpoint()
-    # res[res < 0] = 0
-    # res[res > 4] = 4
+    print("- Writing to nrrd")
     nrrd.write(str(args.out_path), res, header={'spacings': (0.976, 0.976, 3)})
 
 if __name__ == '__main__':

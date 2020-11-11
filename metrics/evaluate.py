@@ -20,7 +20,7 @@ __all__ = (
 
 def nmse(orig: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:
     """ Compute Normalized Mean Squared Error (NMSE) """
-    return torch.norm(pred, orig) ** 2 / torch.norm(orig) ** 2
+    return torch.norm(pred - orig) ** 2 / torch.norm(orig) ** 2
 
 def psnr(orig: torch.Tensor, pred: torch.Tensor, data_range: float) -> torch.Tensor:
     return 10 * torch.log10((data_range ** 2) / F.mse_loss(pred, orig))
@@ -29,7 +29,7 @@ def ssim3d(img1: torch.Tensor, img2: torch.Tensor, window_size: int = 11, size_a
     (_, channel, _, _, _) = img1.size()
     window = _create_window_3D(window_size, channel)
     window = window.type_as(img1)
-    
+
     return _ssim_3D(img1, img2, window, window_size, channel, size_average)
 
 def _gaussian(window_size: int, sigma: float) -> torch.Tensor:
@@ -43,7 +43,7 @@ def _create_window_3D(window_size: int, channel: int):
     _3D_window = _1D_window.mm(_2D_window.reshape(1, -1)).reshape(window_size, window_size, window_size).float().unsqueeze(0).unsqueeze(0)
     window = Variable(_3D_window.expand(channel, 1, window_size, window_size, window_size).contiguous())
     return window
-    
+
 def _ssim_3D(img1: torch.Tensor, img2: torch.Tensor, window: torch.Tensor, window_size: int, channel: int, size_average: bool = True) -> torch.Tensor:
     mu1 = F.conv3d(img1, window, padding = window_size//2, groups = channel)
     mu2 = F.conv3d(img2, window, padding = window_size//2, groups = channel)
