@@ -134,20 +134,23 @@ class VQVAE(pl.LightningModule):
         loc = F.softplus(self(x))
 
         # ssim before cylinder extraction because that flattens xy dimensions
-        eval_ssim_dict = _eval_ssim3d(x, loc)
+        # eval_ssim_dict = _eval_ssim3d(x, loc)
 
         if self.pre_loss_f:
             loc, x = map(self.pre_loss_f, (loc, x))
 
         unreduced_loss = loss_f(loc, x, reduction='none')
+        # reduced_loss = loss_f(loc, x)
 
         log_dict = {
+            # 'loss_mean': reduced_loss.detach(),
             **_sub_metric_log_dict('loss', unreduced_loss),
             **_sub_metric_log_dict('loc', loc),
             **_eval_metrics_log_dict(orig=x, pred=loc),
-            **eval_ssim_dict
+            # **eval_ssim_dict
         }
 
+        # return reduced_loss, log_dict
         return unreduced_loss.mean(), log_dict
 
     def mse(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
@@ -439,23 +442,44 @@ class ResizeConv3D(nn.Conv3d):
     def forward(self, input):
         return super(ResizeConv3D, self).forward(self.upsample(input))
 
+class ConcatActivation(nn.Module):
+    def __init__(self, activation):
+        super(ConcatActivation, self).__init__()
+        self.activation = activation()
+
+    def forward(self, x):
+        return torch.cat([
+            self.activation(x),
+            self.activation(-x)
+        ], dim=1)
+
+class ConcatELU(ConcatActivation):
+    def __init__(self):
+        super(ConcatELU, self).__init__(activation=nn.ELU)
 
 class FixupResBlock(torch.nn.Module):
     # Adapted from:
     # https://github.com/hongyi-zhang/Fixup/blob/master/imagenet/models/fixup_resnet_imagenet.py#L20
 
-    def __init__(self, in_channels, out_channels, mode, activation=nn.ELU):
+    def __init__(self, in_channels, out_channels, mode, activation=ConcatELU):
         super(FixupResBlock, self).__init__()
 
         assert mode in ("down", "same", "up", "out")
         self.mode = mode
 
+        if (concat_activation := issubclass(activation, ConcatActivation)):
+            assert out_channels % 2 == 0 or mode == 'out'
+        else:
+            activation = nn.ELU
+
+        branch_channels = max(in_channels, out_channels)
+
+        self.activation = activation()
+
         self.bias1a, self.bias1b, self.bias2a, self.bias2b = (
             nn.Parameter(torch.zeros(1)) for _ in range(4)
         )
         self.scale = nn.Parameter(torch.ones(1))
-
-        self.activation = activation()
 
         if mode == 'down':
             conv = nn.Conv3d
@@ -468,20 +492,29 @@ class FixupResBlock(torch.nn.Module):
             kernel_size, stride, padding = 3, 1, 1
 
         self.branch_conv1 = conv(
-            in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
-            stride=stride, padding=padding, bias=False
+            in_channels=in_channels,
+            out_channels=(
+                branch_channels if not concat_activation
+                else branch_channels // 2
+            ),
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            bias=False
         )
 
         self.skip_conv1 = conv(
-            in_channels=in_channels, out_channels=out_channels, bias=True,
+            in_channels=in_channels,
+            out_channels=out_channels if not concat_activation or mode == 'out' else out_channels // 2,
             kernel_size=(1 if mode != 'down' else 2),
             stride=(1 if mode != 'down' else 2),
             padding=(0 if mode != 'down' else 0),
+            bias=True
         )
 
         self.branch_conv2 = torch.nn.Conv3d(
-            in_channels=out_channels,
-            out_channels=out_channels,
+            in_channels=branch_channels,
+            out_channels=out_channels if not concat_activation or mode == 'out' else out_channels // 2,
             kernel_size=3,
             stride=1,
             padding=1,
