@@ -66,19 +66,21 @@ class CTDataModule(pl.LightningDataModule):
 
 
 def main(args):
+    torch.cuda.empty_cache()
+
     pl.trainer.seed_everything(seed=42)
 
-    datamodule = CTDataModule(path=args.dataset_path, batch_size=args.batch_size, num_workers=6)
+    datamodule = CTDataModule(path=args.dataset_path, batch_size=args.batch_size, num_workers=5)
 
     model = VQVAE(args)
 
-    checkpoint_callback = pl.callbacks.ModelCheckpoint(save_last=True, save_top_k=3, monitor='val_loss_mean')
-    lr_logger = pl.callbacks.LearningRateMonitor(logging_interval='step')
+    checkpoint_callback = pl.callbacks.ModelCheckpoint(save_top_k=1, save_last=True, monitor='val_loss_mean')
 
     trainer = pl.Trainer(
         gpus="-1",
         auto_select_gpus=True,
         distributed_backend='ddp',
+
         benchmark=True,
         num_nodes=args.num_nodes,
 
@@ -98,13 +100,9 @@ def main(args):
         flush_logs_every_n_steps=100,
         weights_summary='full',
 
-        # limit_val_batches=0,
-        # overfit_batches=1,
-
-        callbacks=[lr_logger],
     )
 
-    trainer.fit(model, datamodule)
+    trainer.fit(model, datamodule=datamodule)
 
 
 if __name__ == '__main__':

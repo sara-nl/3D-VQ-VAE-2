@@ -13,7 +13,7 @@ from utils import CTScanDataset
 
 def main(args: Namespace):
 
-    key, min_val, max_val, scale_val = 'img', -1500, 3000, 1000
+    min_val, max_val, scale_val = -1500, 3000, 1000
 
     transform = transforms.Compose([
         transforms.AddChannel(),
@@ -27,6 +27,7 @@ def main(args: Namespace):
         transforms.ToTensor()
     ])
 
+    print("- Loading dataloader")
     dataset = CTScanDataset(args.dataset_path, transform=transform, spacing=(0.976, 0.976, 3))
     train_loader = DataLoader(dataset, batch_size=1, num_workers=0, pin_memory=True)
 
@@ -48,6 +49,8 @@ def main(args: Namespace):
 
     print("- Writing to nrrd")
     nrrd.write(str(args.out_path), res, header={'spacings': (0.976, 0.976, 3)})
+
+    print("- Done")
 
 if __name__ == '__main__':
     parser = ArgumentParser()

@@ -61,7 +61,7 @@ class CTScanDataset(Dataset):
     def __len__(self) -> int:
         return self.scans.shape[0]
 
-    @lru_cache(maxsize=1)
+    # @lru_cache(maxsize=1)
     def get_scan(self, scan_index: int) -> Tuple[np.array, dict]:
         data, metadata = nrrd.read(self.scans[scan_index])
         return data.astype(np.float32), metadata

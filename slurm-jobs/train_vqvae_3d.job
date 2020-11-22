@@ -6,9 +6,11 @@
 #SBATCH -p gpu_titanrtx
 export OMP_NUM_THREADS=6
 
+# Flags made to be edited
 DATASET_NAME="14"
+DATASET_EXT=".tar" # must be .tar
+DATASET_ROOT="/project/robertsc/"
 CONDA_ENV="pytorch1.6"
-
 METRIC="huber" # options ("mse", "rmse", "mae", "huber", "normal_nll", "logistic_mixture_nll")
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
@@ -35,16 +37,17 @@ echo "- setting up env"
 module load 2020
 module load Miniconda3
 
+# Multi-node copy util
+module load mpicopy/4.2-gompi-2020a
+
 # Cuda/cuDNN/NCCL
 module load NCCL/2.7.8-gcccuda-2020a
 module load cuDNN/8.0.3.33-gcccuda-2020a
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
-# Copy utils
-module load mpicopy
-
 echo "- activating conda env $CONDA_ENV"
+source deactivate
 source activate "$CONDA_ENV"
 
 SCRIPTPATH="$ROOT_DIR/vqvae/3d/train.py"
@@ -61,9 +64,8 @@ if [ -z $INDIR ]; then
 fi
 echo "- using INDIR $INDIR"
 
-DATASET_PATH="/nfs/radioct/"$DATASET_NAME".tar"
+DATASET_PATH="$DATASET_ROOT""$DATASET_NAME""$DATASET_EXT"
 DATASET_INDIR="$INDIR"/"$DATASET_NAME"
-
 echo "- assuming Dataset path $DATASET_PATH"
 
 echo "- setting args"
@@ -83,7 +85,7 @@ if (( $NUM_NODES > 1 )); then
     echo "- copying dataset"
     mpicopy -v "$DATASET_PATH" -o $INDIR
     echo "- untarring dataset"
-    srun -n $NUM_NODES --tasks-per-node=1 tar -xkf "$INDIR"/"$DATASET_NAME".tar -C "$INDIR"
+    srun -n $NUM_NODES --tasks-per-node=1 tar -xkf "$INDIR"/"$DATASET_NAME""$DATASET_EXT" -C "$INDIR"
     echo "- starting run"
     srun python "$SCRIPTPATH" $PYTHON_ARGS
 else
@@ -93,6 +95,6 @@ else
     echo "- untarring dataset"
     tar -xkf "$INDIR"/"$DATASET_NAME".tar -C "$INDIR"
     echo "- starting run"
-    python "$SCRIPTPATH" $PYTHON_ARGS
+    python -m pdb "$SCRIPTPATH" $PYTHON_ARGS
 fi
 

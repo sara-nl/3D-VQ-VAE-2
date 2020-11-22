@@ -461,18 +461,14 @@ class FixupResBlock(torch.nn.Module):
     # Adapted from:
     # https://github.com/hongyi-zhang/Fixup/blob/master/imagenet/models/fixup_resnet_imagenet.py#L20
 
-    def __init__(self, in_channels, out_channels, mode, activation=ConcatELU):
+    def __init__(self, in_channels, out_channels, mode, activation=nn.ELU):
         super(FixupResBlock, self).__init__()
 
         assert mode in ("down", "same", "up", "out")
         self.mode = mode
 
-        if (concat_activation := issubclass(activation, ConcatActivation)):
-            assert out_channels % 2 == 0 or mode == 'out'
-        else:
-            activation = nn.ELU
-
-        branch_channels = max(in_channels, out_channels)
+        # branch_channels = max(in_channels, out_channels)
+        branch_channels = out_channels
 
         self.activation = activation()
 
@@ -493,10 +489,7 @@ class FixupResBlock(torch.nn.Module):
 
         self.branch_conv1 = conv(
             in_channels=in_channels,
-            out_channels=(
-                branch_channels if not concat_activation
-                else branch_channels // 2
-            ),
+            out_channels=branch_channels,
             kernel_size=kernel_size,
             stride=stride,
             padding=padding,
@@ -505,7 +498,7 @@ class FixupResBlock(torch.nn.Module):
 
         self.skip_conv1 = conv(
             in_channels=in_channels,
-            out_channels=out_channels if not concat_activation or mode == 'out' else out_channels // 2,
+            out_channels=out_channels,
             kernel_size=(1 if mode != 'down' else 2),
             stride=(1 if mode != 'down' else 2),
             padding=(0 if mode != 'down' else 0),
@@ -514,7 +507,7 @@ class FixupResBlock(torch.nn.Module):
 
         self.branch_conv2 = torch.nn.Conv3d(
             in_channels=branch_channels,
-            out_channels=out_channels if not concat_activation or mode == 'out' else out_channels // 2,
+            out_channels=out_channels,
             kernel_size=3,
             stride=1,
             padding=1,
@@ -537,8 +530,9 @@ class FixupResBlock(torch.nn.Module):
         return out
 
     def initialize_weights(self, num_layers):
+        m = 2 # number of convs in a branch
 
-        torch.nn.init.kaiming_normal_(self.branch_conv1.weight)
+        torch.nn.init.kaiming_normal_(self.branch_conv1.weight) * (num_layers ** (-1 / (2*m - m)))
 
         torch.nn.init.constant_(tensor=self.branch_conv2.weight, val=0)
 
