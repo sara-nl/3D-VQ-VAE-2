@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH -N 4
+#SBATCH -N 8
 #SBATCH --tasks-per-node 4
 #SBATCH -t 5-00:00:00
 #SBATCH -p gpu_titanrtx
