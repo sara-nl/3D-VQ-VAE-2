@@ -80,9 +80,10 @@ class VQVAE(pl.LightningModule):
         self.apply(lambda layer: layer.initialize_weights(num_layers=self.num_layers) if isinstance(layer, FixupResBlock) else None)
 
     def forward(self, data):
-        _, quantizations, _, _, _ = zip(*self.encode(data)) # list transpose of encoder outputs
+        commitment_loss, quantizations, perplexity, encodings, encoding_idx = zip(*self.encode(data))
+
         decoded = self.decode(quantizations)
-        return decoded
+        return decoded, (commitment_loss, quantizations, perplexity, encodings, encoding_idx)
 
     def encode(self, data):
         return self.encoder(data)
@@ -131,7 +132,8 @@ class VQVAE(pl.LightningModule):
     def loc_metric(self, batch, batch_idx, loss_f) -> Tuple[torch.Tensor, dict]:
         x, _ = batch
 
-        loc = F.softplus(self(x))
+        loc, (commitment_loss, *_) = self(x)
+        loc = F.softplus(loc)
 
         # ssim before cylinder extraction because that flattens xy dimensions
         # eval_ssim_dict = _eval_ssim3d(x, loc)
@@ -139,19 +141,22 @@ class VQVAE(pl.LightningModule):
         if self.pre_loss_f:
             loc, x = map(self.pre_loss_f, (loc, x))
 
-        unreduced_loss = loss_f(loc, x, reduction='none')
+        unreduced_recon_loss = loss_f(loc, x, reduction='none')
         # reduced_loss = loss_f(loc, x)
 
         log_dict = {
             # 'loss_mean': reduced_loss.detach(),
-            **_sub_metric_log_dict('loss', unreduced_loss),
+            **_sub_metric_log_dict('recon_loss', unreduced_recon_loss),
+            **{f'commitment_loss_{i}': commitment_loss[i] for i in range(len(commitment_loss))},
             **_sub_metric_log_dict('loc', loc),
             **_eval_metrics_log_dict(orig=x, pred=loc),
             # **eval_ssim_dict
         }
 
+        # loss = unreduced_recon_loss.mean()
+        loss = unreduced_recon_loss.mean() + sum(commitment_loss)
         # return reduced_loss, log_dict
-        return unreduced_loss.mean(), log_dict
+        return loss, log_dict
 
     def mse(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
         return self.loc_metric(batch, batch_idx, F.mse_loss)
@@ -370,7 +375,7 @@ class Encoder(nn.Module):
                 n_up=n_down_per_enc
             ))
             self.quantize.append(
-                Quantizer(num_embeddings=256, embedding_dim=embedding_dim, commitment_cost=7)
+                Quantizer(num_embeddings=256, embedding_dim=embedding_dim, commitment_cost=0.25)
             )
 
             before_channels = after_channels
@@ -383,12 +388,8 @@ class Encoder(nn.Module):
         aux = None
         quantizations = []
         for down, pre_quantize, quantize in reversed(list(zip(downsampled, self.pre_quantize, self.quantize))):
-            pre_quantizion = pre_quantize(down, aux)
+            quantizations.append((quantization := quantize(pre_quantize(down, aux))))
 
-            quantization = (None, pre_quantizion, None, None, None)
-            # quantization = quantize(pre_quantizion)
-
-            quantizations.append(quantization)
             _, aux, _, _, _ = quantization
 
         return reversed(quantizations)
@@ -572,6 +573,9 @@ class Quantizer(torch.nn.Module):
         self._decay = decay
         self._epsilon = epsilon
 
+        self.first_pass = True
+
+    @torch.cuda.amp.autocast(enabled=False)
     def forward(self, inputs):
         inputs = inputs.permute(0, 2, 3, 4, 1)
         input_shape = inputs.shape
@@ -579,41 +583,48 @@ class Quantizer(torch.nn.Module):
         flat_input = inputs.reshape(-1, self._embedding_dim)
 
         distances = (
-            torch.sum(flat_input ** 2, dim=1, keepdim=True)
-            + torch.sum(self._embedding.weight ** 2, dim=1)
-            - 2 * torch.matmul(flat_input, self._embedding.weight.t())
+            (flat_input ** 2).sum(dim=1, keepdim=True)
+            + (self._embedding.weight ** 2).sum(dim=1)
+            - 2 * flat_input @ self._embedding.weight.T
         )
 
-        encoding_indices = torch.argmin(distances, dim=1).unsqueeze(1)
-        encodings = torch.zeros(
-            encoding_indices.shape[0], self._num_embeddings, device=inputs.device
-        )
-        encodings.scatter_(1, encoding_indices, 1)
+        encoding_indices = torch.argmin(distances, dim=1)
+        encodings = F.one_hot(
+            encoding_indices, num_classes=self._num_embeddings
+        ).type_as(inputs)
 
-        quantized = torch.matmul(encodings, self._embedding.weight).view(
-            input_shape
-        )
+        quantized = self._embedding(encoding_indices).reshape(input_shape)
 
         if self.training:
+            if self.first_pass:
+                self._ema_cluster_size = self._ema_cluster_size + encodings.sum(dim=0)
+                self.first_pass = False
+
             self._ema_cluster_size = self._ema_cluster_size * self._decay + (
                 1 - self._decay
-            ) * torch.sum(encodings, 0)
+            ) * encodings.sum(dim=0)
 
-            n = torch.sum(self._ema_cluster_size.data)
-            self._ema_cluster_size = (
-                (self._ema_cluster_size + self._epsilon)
-                / (n + self._num_embeddings * self._epsilon)
-                * n
-            )
+            # n = self._ema_cluster_size.sum()
+            # self._ema_cluster_size = (
+            #     (self._ema_cluster_size + self._epsilon)
+            #     / (n + self._num_embeddings * self._epsilon)
+            #     * n
+            # )
 
-            dw = torch.matmul(encodings.t(), flat_input)
+            dw = encodings.T.type_as(flat_input) @ flat_input
             self._ema_w = torch.nn.Parameter(
                 self._ema_w * self._decay + (1 - self._decay) * dw
             )
 
-            self._embedding.weight = torch.nn.Parameter(
-                self._ema_w / self._ema_cluster_size.unsqueeze(1)
-            )
+            non_zero = self._ema_cluster_size != 0
+
+            fill = self._embedding.weight.detach().clone()
+            fill[non_zero] = self._ema_w[non_zero] / self._ema_cluster_size.unsqueeze(1)[non_zero]
+            self._embedding.weight = torch.nn.Parameter(fill)
+
+            # self._embedding.weight[non_zero] = torch.nn.Parameter(
+            #     self._ema_w[non_zero] / self._ema_cluster_size.unsqueeze(1)[non_zero]
+            # )
 
         e_latent_loss = torch.nn.functional.mse_loss(quantized.detach(), inputs)
         loss = self._commitment_cost * e_latent_loss
@@ -624,7 +635,7 @@ class Quantizer(torch.nn.Module):
 
         return (
             loss,
-            quantized.permute(0, 4, 1, 2, 3).contiguous(),
+            quantized.permute(0, 4, 1, 2, 3),
             perplexity,
             encodings,
             encoding_indices,

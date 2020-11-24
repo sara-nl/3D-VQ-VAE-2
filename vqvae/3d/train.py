@@ -74,11 +74,11 @@ def main(args):
 
     model = VQVAE(args)
 
-    checkpoint_callback = pl.callbacks.ModelCheckpoint(save_top_k=1, save_last=True, monitor='val_loss_mean')
+    checkpoint_callback = pl.callbacks.ModelCheckpoint(save_top_k=1, save_last=True, monitor='val_recon_loss_mean')
 
     trainer = pl.Trainer(
         gpus="-1",
-        auto_select_gpus=True,
+        # auto_select_gpus=True,
         distributed_backend='ddp',
 
         benchmark=True,
@@ -99,7 +99,6 @@ def main(args):
         val_check_interval=0.5,
         flush_logs_every_n_steps=100,
         weights_summary='full',
-
     )
 
     trainer.fit(model, datamodule=datamodule)
