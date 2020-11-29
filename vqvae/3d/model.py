@@ -443,20 +443,6 @@ class ResizeConv3D(nn.Conv3d):
     def forward(self, input):
         return super(ResizeConv3D, self).forward(self.upsample(input))
 
-class ConcatActivation(nn.Module):
-    def __init__(self, activation):
-        super(ConcatActivation, self).__init__()
-        self.activation = activation()
-
-    def forward(self, x):
-        return torch.cat([
-            self.activation(x),
-            self.activation(-x)
-        ], dim=1)
-
-class ConcatELU(ConcatActivation):
-    def __init__(self):
-        super(ConcatELU, self).__init__(activation=nn.ELU)
 
 class FixupResBlock(torch.nn.Module):
     # Adapted from:
