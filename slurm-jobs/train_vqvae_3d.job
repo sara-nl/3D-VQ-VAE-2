@@ -10,7 +10,7 @@ export OMP_NUM_THREADS=6
 DATASET_NAME="14"
 DATASET_EXT=".tar" # must be .tar
 DATASET_ROOT="/project/robertsc/"
-CONDA_ENV="pytorch1.6"
+CONDA_ENV="pytorch1.7"
 METRIC="huber" # options ("mse", "rmse", "mae", "huber", "normal_nll", "logistic_mixture_nll")
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
@@ -95,6 +95,5 @@ else
     echo "- untarring dataset"
     tar -xkf "$INDIR"/"$DATASET_NAME".tar -C "$INDIR"
     echo "- starting run"
-    python -m pdb "$SCRIPTPATH" $PYTHON_ARGS
+    python "$SCRIPTPATH" $PYTHON_ARGS
 fi
-
