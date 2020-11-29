@@ -539,83 +539,85 @@ class Quantizer(torch.nn.Module):
     FIXME: Remove either output one-hot(TODO: check actually one-hot) or dense encoding indices
     """
     def __init__(
-        self, num_embeddings : int, embedding_dim : int, commitment_cost : float, decay=0.99, epsilon=1e-5
+        self, num_embeddings : int, embedding_dim : int, commitment_cost : float, decay=0.99, laplace_alpha=1e-5
     ):
         super(Quantizer, self).__init__()
 
-        self._embedding_dim = embedding_dim
-        self._num_embeddings = num_embeddings
 
-        self._embedding = torch.nn.Embedding(self._num_embeddings, self._embedding_dim)
-        self._embedding.weight.data.normal_()
-        self._commitment_cost = commitment_cost
+        embed = torch.randn(num_embeddings, embedding_dim)
+        self.register_buffer("embed", embed) # e_i
+        self.register_buffer("embed_avg", embed.clone()) # m_i
+        self.register_buffer("cluster_size", torch.zeros(num_embeddings)) # N_i
 
-        self.register_buffer("_ema_cluster_size", torch.zeros(num_embeddings))
-        self._ema_w = torch.nn.Parameter(
-            torch.Tensor(num_embeddings, self._embedding_dim)
-        )
-        self._ema_w.data.normal_()
+        self.commitment_cost = commitment_cost
 
-        self._decay = decay
-        self._epsilon = epsilon
+        self.decay = decay
+        self.laplace_alpha = laplace_alpha
+
+        self.embedding_dim = embedding_dim
+        self.num_embeddings = num_embeddings
 
         self.first_pass = True
 
+    def embed_code(self, embed_idx):
+        return F.embedding(embed_idx, self.embed)
+
     @torch.cuda.amp.autocast(enabled=False)
     def forward(self, inputs):
-        inputs = inputs.permute(0, 2, 3, 4, 1)
+
+        inputs = inputs.permute(0, 2, 3, 4, 1) # XXX: might not actually be necessary
         input_shape = inputs.shape
 
-        flat_input = inputs.reshape(-1, self._embedding_dim)
+        flat_input = inputs.reshape(-1, self.embedding_dim)
 
         distances = (
             (flat_input ** 2).sum(dim=1, keepdim=True)
-            + (self._embedding.weight ** 2).sum(dim=1)
-            - 2 * flat_input @ self._embedding.weight.T
+            + (self.embed ** 2).sum(dim=1)
+            - 2 * flat_input @ self.embed.T
         )
 
         encoding_indices = torch.argmin(distances, dim=1)
         encodings = F.one_hot(
-            encoding_indices, num_classes=self._num_embeddings
+            encoding_indices, num_classes=self.num_embeddings
         ).type_as(inputs)
 
-        quantized = self._embedding(encoding_indices).reshape(input_shape)
+        quantized = self.embed_code(encoding_indices).reshape(input_shape)
 
         if self.training:
+            # buffer updates need to be in-place because of distributed
+
             if self.first_pass:
-                self._ema_cluster_size = self._ema_cluster_size + encodings.sum(dim=0)
+                self.cluster_size.data.add_(encodings.sum() / self.num_embeddings)
                 self.first_pass = False
 
-            self._ema_cluster_size = self._ema_cluster_size * self._decay + (
-                1 - self._decay
-            ) * encodings.sum(dim=0)
+            new_cluster_size = encodings.sum(dim=0)
+            dw = encodings.T @ flat_input
 
-            # n = self._ema_cluster_size.sum()
-            # self._ema_cluster_size = (
-            #     (self._ema_cluster_size + self._epsilon)
-            #     / (n + self._num_embeddings * self._epsilon)
-            #     * n
-            # )
+            if torch.distributed.is_initialized():
+                torch.distributed.all_reduce(new_cluster_size)
+                torch.distributed.all_reduce(dw)
 
-            dw = encodings.T.type_as(flat_input) @ flat_input
-            self._ema_w = torch.nn.Parameter(
-                self._ema_w * self._decay + (1 - self._decay) * dw
+            self.cluster_size.data.mul_(self.decay).add_(
+                new_cluster_size, alpha=(1-self.decay)
             )
 
-            non_zero = self._ema_cluster_size != 0
+            self.embed_avg.data.mul_(self.decay).add_(dw, alpha=(1-self.decay))
 
-            fill = self._embedding.weight.detach().clone()
-            fill[non_zero] = self._ema_w[non_zero] / self._ema_cluster_size.unsqueeze(1)[non_zero]
-            self._embedding.weight = torch.nn.Parameter(fill)
+            # Laplacian smoothing
+            n = self.cluster_size.sum()
+            cluster_size = n * ( # times n because we don't want probabilities but counts
+                (self.cluster_size + self.laplace_alpha)
+                / (n + self.num_embeddings * self.laplace_alpha)
+            )
 
-            # self._embedding.weight[non_zero] = torch.nn.Parameter(
-            #     self._ema_w[non_zero] / self._ema_cluster_size.unsqueeze(1)[non_zero]
-            # )
+            embed_normalized = self.embed_avg / cluster_size.unsqueeze(dim=-1)
+            self.embed.data.copy_(embed_normalized)
 
-        e_latent_loss = torch.nn.functional.mse_loss(quantized.detach(), inputs)
-        loss = self._commitment_cost * e_latent_loss
+        e_latent_loss = F.mse_loss(quantized.detach(), inputs)
+        loss = self.commitment_cost * e_latent_loss
 
         quantized = inputs + (quantized - inputs).detach() # Trick to have identity backprop grads
+
         avg_probs = torch.mean(encodings, dim=0)
         perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
 
