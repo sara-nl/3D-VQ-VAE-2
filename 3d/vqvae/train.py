@@ -6,7 +6,6 @@ from typing import Union, Tuple
 import torch
 import pytorch_lightning as pl
 import numpy as np
-import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, random_split
 from monai import transforms
 
@@ -100,8 +99,8 @@ def main(args):
         flush_logs_every_n_steps=100,
         weights_summary='full',
     )
-
     trainer.fit(model, datamodule=datamodule)
+
 
 
 if __name__ == '__main__':

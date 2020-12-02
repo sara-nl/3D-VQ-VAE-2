@@ -375,7 +375,7 @@ class Encoder(nn.Module):
                 n_up=n_down_per_enc
             ))
             self.quantize.append(
-                Quantizer(num_embeddings=256, embedding_dim=embedding_dim, commitment_cost=0.25)
+                Quantizer(num_embeddings=512, embedding_dim=embedding_dim, commitment_cost=0.25)
             )
 
             before_channels = after_channels
@@ -549,6 +549,8 @@ class Quantizer(torch.nn.Module):
         self.register_buffer("embed_avg", embed.clone()) # m_i
         self.register_buffer("cluster_size", torch.zeros(num_embeddings)) # N_i
 
+        self.register_buffer("first_pass", torch.as_tensor(True))
+
         self.commitment_cost = commitment_cost
 
         self.decay = decay
@@ -557,7 +559,6 @@ class Quantizer(torch.nn.Module):
         self.embedding_dim = embedding_dim
         self.num_embeddings = num_embeddings
 
-        self.first_pass = True
 
     def embed_code(self, embed_idx):
         return F.embedding(embed_idx, self.embed)
@@ -585,10 +586,9 @@ class Quantizer(torch.nn.Module):
 
         if self.training:
             # buffer updates need to be in-place because of distributed
-
             if self.first_pass:
                 self.cluster_size.data.add_(encodings.sum() / self.num_embeddings)
-                self.first_pass = False
+                self.first_pass.mul_(False)
 
             new_cluster_size = encodings.sum(dim=0)
             dw = encodings.T @ flat_input
