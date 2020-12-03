@@ -109,3 +109,4 @@ out/
 checkpoint/
 datasets/
 codes/
+!*.job
