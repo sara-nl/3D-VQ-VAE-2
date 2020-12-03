@@ -4,7 +4,7 @@ This is largely a refactor of https://github.com/danieltudosiu/nmpevqvae
 
 from itertools import zip_longest, chain
 from functools import partial
-from typing import Tuple
+from typing import Tuple, List
 from argparse import ArgumentParser, Namespace
 from math import prod
 
@@ -69,6 +69,7 @@ class VQVAE(pl.LightningModule):
             base_network_channels=self.base_network_channels,
             n_enc=self.n_bottleneck_blocks,
             n_down_per_enc=self.n_blocks_per_bottleneck,
+            num_embeddings=self.num_embeddings
         )
         self.decoder = Decoder(
             out_channels=self.output_channels,
@@ -256,6 +257,12 @@ class VQVAE(pl.LightningModule):
         self.n_bottleneck_blocks = args.n_bottleneck_blocks
         self.n_blocks_per_bottleneck = args.n_blocks_per_bottleneck
 
+        assert len(args.num_embeddings) in (1, args.n_bottleneck_blocks)
+        if len(args.num_embeddings) == 1:
+            self.num_embeddings = [args.num_embeddings[0] for _ in range(args.n_bottleneck_blocks)]
+        else:
+            self.num_embeddings = args.num_embeddings
+
         self.num_layers = (
             (3 * args.n_bottleneck_blocks - 1)
             * args.n_blocks_per_bottleneck
@@ -274,6 +281,9 @@ class VQVAE(pl.LightningModule):
         parser.add_argument('--base-network_channels', type=int, default=4)
         parser.add_argument('--n-bottleneck-blocks', type=int, default=3)
         parser.add_argument('--n-blocks-per-bottleneck', type=int, default=2)
+        parser.add_argument('--num-embeddings', type=int, default=512, nargs='+',
+                            help=("Can be either a single int or multiple."
+                                  " If multiple, number of args should be equal to n-bottleneck-blocks"))
 
         # loss calculation specific
         parser.add_argument('--extract-center-cylinder', type=bool, default=True)
@@ -353,7 +363,7 @@ class PreQuantization(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, in_channels, base_network_channels, n_enc=3, n_down_per_enc=2):
+    def __init__(self, in_channels, base_network_channels, num_embeddings: List[int], n_enc=3, n_down_per_enc=2):
         super(Encoder, self).__init__()
 
         self.parse_input = FixupResBlock(in_channels, base_network_channels, mode='same')
@@ -374,7 +384,7 @@ class Encoder(nn.Module):
                 n_up=n_down_per_enc
             ))
             self.quantize.append(
-                Quantizer(num_embeddings=512, embedding_dim=embedding_dim, commitment_cost=0.25)
+                Quantizer(num_embeddings=num_embeddings[i], embedding_dim=embedding_dim, commitment_cost=0.25)
             )
 
             before_channels = after_channels
