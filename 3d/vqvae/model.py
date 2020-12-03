@@ -289,7 +289,6 @@ class VQVAE(pl.LightningModule):
         return parser
 
 
-
 class DownBlock(nn.Module):
     def __init__(self, in_channels, n_down=2):
         super(DownBlock, self).__init__()
@@ -419,10 +418,6 @@ class Decoder(nn.Module):
 
             after_channels = before_channels
 
-        # self.out = nn.Sequential(
-        #     FixupResBlock(base_network_channels, base_network_channels, mode='same'),
-        #     FixupResBlock(base_network_channels, out_channels, mode='out'),
-        # )
         self.out = FixupResBlock(base_network_channels, out_channels, mode='out')
 
     def forward(self, quantizations):
@@ -543,13 +538,13 @@ class Quantizer(torch.nn.Module):
     ):
         super(Quantizer, self).__init__()
 
-
         embed = torch.randn(num_embeddings, embedding_dim)
         self.register_buffer("embed", embed) # e_i
         self.register_buffer("embed_avg", embed.clone()) # m_i
         self.register_buffer("cluster_size", torch.zeros(num_embeddings)) # N_i
 
-        self.register_buffer("first_pass", torch.as_tensor(True))
+        # Needs to be a buffer, otherwise doesn't get added to state dict
+        self.register_buffer("first_pass", torch.as_tensor(1))
 
         self.commitment_cost = commitment_cost
 
@@ -588,7 +583,7 @@ class Quantizer(torch.nn.Module):
             # buffer updates need to be in-place because of distributed
             if self.first_pass:
                 self.cluster_size.data.add_(encodings.sum() / self.num_embeddings)
-                self.first_pass.mul_(False)
+                self.first_pass.mul_(0)
 
             new_cluster_size = encodings.sum(dim=0)
             dw = encodings.T @ flat_input
@@ -628,106 +623,3 @@ class Quantizer(torch.nn.Module):
             encodings,
             encoding_indices,
         )
-
-
-class SubPixelConvolution3D(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, upsample_factor=2, **conv_kwargs):
-        super(SubPixelConvolution3D, self).__init__()
-        assert upsample_factor == 2
-        self.upsample_factor = upsample_factor
-
-        self.conv = torch.nn.Conv3d(
-            in_channels=in_channels,
-            out_channels=out_channels * upsample_factor ** 3,
-            **conv_kwargs
-        )
-
-        self.shuffle = PixelShuffle3D(
-            upscale_factor=upsample_factor
-        )
-
-        self.initialize_weights()
-
-    def forward(self, input):
-        out = self.conv(input)
-        out = self.shuffle(out)
-        return out
-
-    def initialize_weights(self):
-        # Written by: Daniele Cattaneo (@catta202000)
-        # Taken from: https://github.com/pytorch/pytorch/pull/5429/files
-
-        new_shape = [
-            int(self.conv.weight.shape[0] / (self.upsample_factor ** 2))
-        ] + list(self.conv.weight.shape[1:])
-        subkernel = torch.zeros(new_shape)
-        subkernel = torch.nn.init.xavier_normal_(subkernel)
-        subkernel = subkernel.transpose(0, 1)
-
-        subkernel = subkernel.contiguous().view(
-            subkernel.shape[0], subkernel.shape[1], -1
-        )
-
-        kernel = subkernel.repeat(1, 1, self.upsample_factor ** 2)
-
-        transposed_shape = (
-            [self.conv.weight.shape[1]]
-            + [self.conv.weight.shape[0]]
-            + list(self.conv.weight.shape[2:])
-        )
-        kernel = kernel.contiguous().view(transposed_shape)
-
-        kernel = kernel.transpose(0, 1)
-
-        self.conv.weight.data = kernel
-
-
-class PixelShuffle3D(torch.nn.Module):
-    def __init__(self, upscale_factor):
-        super(PixelShuffle3D, self).__init__()
-        self.upscale_factor = upscale_factor
-        self.upscale_factor_cubed = upscale_factor ** 3
-        self._shuffle_out = None
-        self._shuffle_in = None
-
-    def forward(self, input):
-        shuffle_out = input.new()
-
-        batch_size, cubed_channels, in_depth, in_height, in_width = input.size()
-
-        assert cubed_channels % self.upscale_factor_cubed == 0
-        channels = cubed_channels // self.upscale_factor_cubed
-
-        input_view = input.view(
-            batch_size,
-            channels,
-            self.upscale_factor,
-            self.upscale_factor,
-            self.upscale_factor,
-            in_depth,
-            in_height,
-            in_width,
-        )
-
-        shuffle_out.resize_(
-            input_view.size(0),
-            input_view.size(1),
-            input_view.size(5),
-            input_view.size(2),
-            input_view.size(6),
-            input_view.size(3),
-            input_view.size(7),
-            input_view.size(4),
-        )
-
-        shuffle_out.copy_(input_view.permute(0, 1, 5, 2, 6, 3, 7, 4))
-
-        out_depth = in_depth * self.upscale_factor
-        out_height = in_height * self.upscale_factor
-        out_width = in_width * self.upscale_factor
-
-        output = shuffle_out.reshape(
-            batch_size, channels, out_depth, out_height, out_width
-        )
-
-        return output
