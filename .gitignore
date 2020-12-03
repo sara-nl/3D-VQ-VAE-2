@@ -109,4 +109,6 @@ out/
 checkpoint/
 datasets/
 codes/
+
+# FIXME: This line doesn't work
 !*.job
