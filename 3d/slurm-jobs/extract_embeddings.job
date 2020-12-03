@@ -1,0 +1,70 @@
+#!/bin/bash
+
+#SBATCH -N 1
+#SBATCH -t 5-00:00:00
+#SBATCH -p gpu_titanrtx_shared
+export OMP_NUM_THREADS=6
+
+# Flags made to be edited
+DATASET_NAME="14"
+DATASET_EXT=".tar" # must be .tar
+DATASET_ROOT="/project/robertsc/"
+CONDA_ENV="pytorch1.7"
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+if [[ $SCRIPT_DIR == *"/var/spool/"* ]] && [ ! -z $SLURM_JOB_ID ]; then
+    # When using slurm, while running a job script (instead of node salloc)
+    SCRIPT_DIR=$( dirname $( scontrol show job $SLURM_JOB_ID | awk -F= '/Command=/{print $2}'))
+fi
+
+ROOT_DIR=$( cd "$SCRIPT_DIR"/..; pwd )
+echo "- found root dir $ROOT_DIR"
+
+echo "- setting up env"
+# Conda env
+module load 2020
+module load Miniconda3
+
+# Cuda/cuDNN/NCCL
+module load NCCL/2.7.8-gcccuda-2020a
+module load cuDNN/8.0.3.33-gcccuda-2020a
+export NCCL_DEBUG=INFO
+export PYTHONFAULTHANDLER=1
+
+echo "- activating conda env $CONDA_ENV"
+source deactivate
+source activate "$CONDA_ENV"
+
+SCRIPT_PATH="$ROOT_DIR/vqvae/extract_embeddings.py"
+OUTPUT_PATH="$ROOT_DIR/vqvae/codes"
+
+INDIR="$TMPDIR"
+if [ -z $INDIR ]; then
+    MAYBE_INDIR="/scratch/slurm.$SLURM_JOB_ID.0/scratch"
+    if [ ! -z $SLURM_JOB_ID ] && [ -d $MAYBE_INDIR ]; then
+        INDIR=$MAYBE_INDIR
+    else
+        echo "- INDIR is empty!"
+        exit 1
+    fi
+fi
+echo "- using INDIR $INDIR"
+
+DATASET_PATH="$DATASET_ROOT""$DATASET_NAME""$DATASET_EXT"
+DATASET_INDIR="$INDIR"/"$DATASET_NAME"
+echo "- assuming Dataset path $DATASET_PATH"
+
+echo "- setting args"
+PYTHON_ARGS="\
+--dataset-path $DATASET_INDIR \
+--output-path $OUTPUT_PATH \
+--checkpoint-path $ROOT_DIR/slurm-jobs/lightning_logs/version_6991397/checkpoints/last.ckpt
+"
+echo "- found args $PYTHON_ARGS"
+
+echo "- copying dataset"
+rsync -ah --info=progress2 "$DATASET_PATH" "$INDIR"
+echo "- untarring dataset"
+tar -xkf "$INDIR"/"$DATASET_NAME".tar -C "$INDIR"
+echo "- starting run"
+python "$SCRIPT_PATH" $PYTHON_ARGS
