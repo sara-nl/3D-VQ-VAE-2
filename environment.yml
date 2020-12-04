@@ -128,7 +128,7 @@ dependencies:
     - itk-numerics==5.1.1
     - itk-registration==5.1.1
     - itk-segmentation==5.1.1
-    - monai==0.2.0+143.g1d2dce7
+    - monai==0.3.0
     - nibabel==3.1.1
     - pytorch-lightning==1.1.0.dev0
     - tensorboard==2.2.0
