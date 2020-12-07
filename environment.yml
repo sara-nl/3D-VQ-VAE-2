@@ -130,7 +130,7 @@ dependencies:
     - itk-segmentation==5.1.1
     - monai==0.3.0
     - nibabel==3.1.1
-    - pytorch-lightning==1.1.0.dev0
+    - pytorch-lightning==1.1.0.rc1
     - tensorboard==2.2.0
 prefix: /home/robertsc/.conda/envs/pytorch1.7
 
