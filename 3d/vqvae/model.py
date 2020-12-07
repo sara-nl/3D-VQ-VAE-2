@@ -81,10 +81,10 @@ class VQVAE(pl.LightningModule):
         self.apply(lambda layer: layer.initialize_weights(num_layers=self.num_layers) if isinstance(layer, FixupResBlock) else None)
 
     def forward(self, data):
-        commitment_loss, quantizations, perplexity, encodings, encoding_idx = zip(*self.encode(data))
+        commitment_loss, quantizations, perplexity, encodings_one_hot, encoding_idx = zip(*self.encode(data))
 
         decoded = self.decode(quantizations)
-        return decoded, (commitment_loss, quantizations, perplexity, encodings, encoding_idx)
+        return decoded, (commitment_loss, quantizations, perplexity, encodings_one_hot, encoding_idx)
 
     def encode(self, data):
         return self.encoder(data)
@@ -564,72 +564,82 @@ class Quantizer(torch.nn.Module):
         self.embedding_dim = embedding_dim
         self.num_embeddings = num_embeddings
 
-
     def embed_code(self, embed_idx):
         return F.embedding(embed_idx, self.embed)
+
+    def _update_ema(self, flat_input, encodings_one_hot):
+        # buffer updates need to be in-place because of distributed
+        if self.first_pass:
+            self.cluster_size.data.add_(encodings_one_hot.sum() / self.num_embeddings)
+            self.first_pass.mul_(0)
+
+        new_cluster_size = encodings_one_hot.sum(dim=0)
+        dw = encodings_one_hot.T @ flat_input
+
+        if torch.distributed.is_initialized():
+            torch.distributed.all_reduce(new_cluster_size)
+            torch.distributed.all_reduce(dw)
+
+        self.cluster_size.data.mul_(self.decay).add_(
+            new_cluster_size, alpha=(1-self.decay)
+        )
+
+        self.embed_avg.data.mul_(self.decay).add_(dw, alpha=(1-self.decay))
+
+        # Laplacian smoothing
+        n = self.cluster_size.sum()
+        cluster_size = n * ( # times n because we don't want probabilities but counts
+            (self.cluster_size + self.laplace_alpha)
+            / (n + self.num_embeddings * self.laplace_alpha)
+        )
+
+        embed_normalized = self.embed_avg / cluster_size.unsqueeze(dim=-1)
+        self.embed.data.copy_(embed_normalized)
+
 
     @torch.cuda.amp.autocast(enabled=False)
     def forward(self, inputs):
 
-        inputs = inputs.permute(0, 2, 3, 4, 1) # XXX: might not actually be necessary
-        input_shape = inputs.shape
+        with torch.no_grad():
+            channel_last = inputs.permute(0, 2, 3, 4, 1) # XXX: might not actually be necessary
+            input_shape = channel_last.shape
 
-        flat_input = inputs.reshape(-1, self.embedding_dim)
+            flat_input = channel_last.reshape(-1, self.embedding_dim)
 
-        distances = (
-            (flat_input ** 2).sum(dim=1, keepdim=True)
-            + (self.embed ** 2).sum(dim=1)
-            - 2 * flat_input @ self.embed.T
-        )
-
-        encoding_indices = torch.argmin(distances, dim=1)
-        encodings = F.one_hot(
-            encoding_indices, num_classes=self.num_embeddings
-        ).type_as(inputs)
-
-        quantized = self.embed_code(encoding_indices).reshape(input_shape)
-
-        if self.training:
-            # buffer updates need to be in-place because of distributed
-            if self.first_pass:
-                self.cluster_size.data.add_(encodings.sum() / self.num_embeddings)
-                self.first_pass.mul_(0)
-
-            new_cluster_size = encodings.sum(dim=0)
-            dw = encodings.T @ flat_input
-
-            if torch.distributed.is_initialized():
-                torch.distributed.all_reduce(new_cluster_size)
-                torch.distributed.all_reduce(dw)
-
-            self.cluster_size.data.mul_(self.decay).add_(
-                new_cluster_size, alpha=(1-self.decay)
+            distances = (
+                (flat_input ** 2).sum(dim=1, keepdim=True)
+                + (self.embed ** 2).sum(dim=1)
+                - 2 * flat_input @ self.embed.T
             )
 
-            self.embed_avg.data.mul_(self.decay).add_(dw, alpha=(1-self.decay))
+            encoding_indices = torch.argmin(distances, dim=1)
+            encodings_one_hot = F.one_hot(
+                encoding_indices, num_classes=self.num_embeddings
+            ).type_as(inputs)
 
-            # Laplacian smoothing
-            n = self.cluster_size.sum()
-            cluster_size = n * ( # times n because we don't want probabilities but counts
-                (self.cluster_size + self.laplace_alpha)
-                / (n + self.num_embeddings * self.laplace_alpha)
-            )
+            quantized = self.embed_code(encoding_indices).reshape(input_shape)
 
-            embed_normalized = self.embed_avg / cluster_size.unsqueeze(dim=-1)
-            self.embed.data.copy_(embed_normalized)
+            if self.training:
+                self._update_ema(flat_input, encodings_one_hot)
+
+            avg_probs = torch.mean(encodings_one_hot, dim=0)
+            perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
+
+            # Cast everything back to the same order and dimensions of the input
+            quantized = quantized.permute(0, 4, 1, 2, 3)
+            encodings_one_hot = encodings_one_hot.reshape((*input_shape[:-1], -1)).permute(0, 4, 1, 2, 3)
+            encoding_indices.reshape(input_shape[:-1])
 
         e_latent_loss = F.mse_loss(quantized.detach(), inputs)
         loss = self.commitment_cost * e_latent_loss
 
-        quantized = inputs + (quantized - inputs).detach() # Trick to have identity backprop grads
-
-        avg_probs = torch.mean(encodings, dim=0)
-        perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
+        # Trick to have identity backprop grads
+        quantized = inputs + (quantized - inputs).detach()
 
         return (
             loss,
-            quantized.permute(0, 4, 1, 2, 3),
+            quantized,
             perplexity,
-            encodings,
+            encodings_one_hot,
             encoding_indices,
         )
