@@ -17,43 +17,10 @@ from einops import rearrange
 from utils.logging_helpers import sub_metric_log_dict
 
 
-def shift_down_3d(input, size=1):
+def shift_backwards_3d(input, size=1):
     '''
-    If an image is given by (b c h w d)
-    Left-Pads the image in the h dimension by `size`
-    [[[1,2],
-      [3,4]],
-     [[5,6],
-      [7,8]]]
-    --> becomes
-    [[[0,0],
-      [1,2]],
-     [[0,0],
-      [5,6]]]
-    '''
-    b, c, h, w, d = input.shape
-    return F.pad(input, (0, 0, 0, 0, size, 0))[..., :h, :, :]
-
-
-def shift_right_3d(input, size=1):
-    ''''
-    If an image is given by (b c h w d)
-    Left-Pads the image in the w dimension by `size`
-    [[[1,2],
-      [3,4]],
-     [[5,6],
-      [7,8]]]
-    --> becomes
-    [[[0,1],
-      [0,3]],
-     [[0,5],
-      [0,7]]]
-    '''
-    b, c, h, w, d = input.shape
-    return F.pad(input, (0, 0, size, 0, 0, 0))[..., :w, :]
-
-def shift_backward_3d(input, size=1):
-    '''
+    If an image is given by (b c d h w)
+    Front-Pads the image in the h dimension by `size`
     [[[1,2],
       [3,4]],
      [[5,6],
@@ -64,8 +31,43 @@ def shift_backward_3d(input, size=1):
      [[1,2],
       [3,4]]]
     '''
-    b, c, h, w, d = input.shape
-    return F.pad(input, (size, 0, 0, 0, 0, 0))[..., :d]
+    b, c, d, h, w = input.shape
+    return F.pad(input, (0, 0, 0, 0, size, 0))[..., :d, :, :]
+
+
+def shift_down_3d(input, size=1):
+    ''''
+    If an image is given by (b c d h w)
+    Top-Pads the image in the h dimension by `size`
+    [[[1,2],
+      [3,4]],
+     [[5,6],
+      [7,8]]]
+    --> becomes
+    [[[0,0],
+      [1,2]],
+     [[0,0],
+      [5,6]]]
+    '''
+    b, c, d, h, w = input.shape
+    return F.pad(input, (0, 0, size, 0, 0, 0))[..., :h, :]
+
+def shift_right_3d(input, size=1):
+    '''
+    If an image is given by (b c d h w)
+    Left-Pads the image in the d dimension by `size`
+    [[[1,2],
+      [3,4]],
+     [[5,6],
+      [7,8]]]
+    --> becomes
+    [[[0,1],
+      [0,3]],
+     [[0,5],
+      [0,7]]]
+    '''
+    b, c, d, h, w = input.shape
+    return F.pad(input, (size, 0, 0, 0, 0, 0))[..., :w]
 
 
 class PixelSNAIL(pl.LightningModule):
@@ -138,5 +140,5 @@ class PixelSNAIL(pl.LightningModule):
     def forward(self, data, condition=None, cache=None):
         return self.layers(rearrange(
             F.one_hot(data, num_classes=self.main_dim),
-            'b h w d c -> b c h w d'
+            'b d h w c -> b c d h w'
         ).to(torch.float))
