@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH -N 4
+#SBATCH -N 6
 #SBATCH --tasks-per-node 4
 #SBATCH -t 5-00:00:00
 #SBATCH -p gpu_titanrtx
@@ -93,5 +93,5 @@ else
     echo "- untarring dataset"
     tar -xkf "$INDIR"/"$DATASET_NAME".tar -C "$INDIR"
     echo "- starting run"
-    python -m pdb "$SCRIPTPATH" $PYTHON_ARGS
+    python "$SCRIPTPATH" $PYTHON_ARGS
 fi

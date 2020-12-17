@@ -18,21 +18,7 @@ from torch import nn
 from utils import ExtractCenterCylinder
 from metrics.distribution import Logistic, mixture_nll_loss, generic_nll_loss
 from metrics.evaluate import nmse, psnr, ssim3d
-
-
-@torch.no_grad()
-def _sub_metric_log_dict(sub_metric_name, sub_metric):
-    with torch.no_grad():
-        return {
-            f'{sub_metric_name}_{func_name}': func(sub_metric)
-            for func_name, func in (
-                ('min', torch.min),
-                ('max', torch.max),
-                ('mean', torch.mean),
-                ('median', torch.median),
-                ('std', torch.std)
-            )
-        }
+from utils import sub_metric_log_dict
 
 @torch.no_grad()
 def _eval_metrics_log_dict(orig, pred):
@@ -81,10 +67,10 @@ class VQVAE(pl.LightningModule):
         self.apply(lambda layer: layer.initialize_weights(num_layers=self.num_layers) if isinstance(layer, FixupResBlock) else None)
 
     def forward(self, data):
-        commitment_loss, quantizations, perplexity, encodings_one_hot, encoding_idx = zip(*self.encode(data))
+        commitment_loss, quantizations, encoding_idx = zip(*self.encode(data))
 
         decoded = self.decode(quantizations)
-        return decoded, (commitment_loss, quantizations, perplexity, encodings_one_hot, encoding_idx)
+        return decoded, (commitment_loss, quantizations, encoding_idx)
 
     def encode(self, data):
         return self.encoder(data)
@@ -123,9 +109,9 @@ class VQVAE(pl.LightningModule):
         unreduced_loss = generic_nll_loss(x, Normal, loc=loc, scale=log_scale.exp(), reduce_sum=False)
 
         log_dict = {
-            **_sub_metric_log_dict('loss', unreduced_loss),
-            **_sub_metric_log_dict('loc', loc),
-            **_sub_metric_log_dict('log_scale', log_scale),
+            **sub_metric_log_dict('loss', unreduced_loss),
+            **sub_metric_log_dict('loc', loc),
+            **sub_metric_log_dict('log_scale', log_scale),
         }
 
         return unreduced_loss.mean(), log_dict
@@ -147,9 +133,9 @@ class VQVAE(pl.LightningModule):
 
         log_dict = {
             # 'loss_mean': reduced_loss.detach(),
-            **_sub_metric_log_dict('recon_loss', unreduced_recon_loss),
+            **sub_metric_log_dict('recon_loss', unreduced_recon_loss),
             **{f'commitment_loss_{i}': commitment_loss[i] for i in range(len(commitment_loss))},
-            **_sub_metric_log_dict('loc', loc),
+            **sub_metric_log_dict('loc', loc),
             **_eval_metrics_log_dict(orig=x, pred=loc),
             # **eval_ssim_dict
         }
@@ -204,10 +190,10 @@ class VQVAE(pl.LightningModule):
         unreduced_nll_loss = mixture_nll_loss(x, loc_scale_dist, self.n_mix, log_pi_k, loc=loc, scale=log_scale.exp(), reduce_sum=False)
 
         log_dict = {
-            **_sub_metric_log_dict('loss', unreduced_nll_loss),
-            **_sub_metric_log_dict('log_pi_k', log_pi_k),
-            **_sub_metric_log_dict('loc', loc),
-            **_sub_metric_log_dict('log_scale', log_scale),
+            **sub_metric_log_dict('loss', unreduced_nll_loss),
+            **sub_metric_log_dict('log_pi_k', log_pi_k),
+            **sub_metric_log_dict('loc', loc),
+            **sub_metric_log_dict('log_scale', log_scale),
         }
 
         return unreduced_nll_loss.mean(), log_dict
@@ -281,7 +267,7 @@ class VQVAE(pl.LightningModule):
         parser.add_argument('--base-network_channels', type=int, default=4)
         parser.add_argument('--n-bottleneck-blocks', type=int, default=3)
         parser.add_argument('--n-blocks-per-bottleneck', type=int, default=2)
-        parser.add_argument('--num-embeddings', type=int, default=512, nargs='+',
+        parser.add_argument('--num-embeddings', type=int, default=256, nargs='+',
                             help=("Can be either a single int or multiple."
                                   " If multiple, number of args should be equal to n-bottleneck-blocks"))
 
@@ -399,7 +385,7 @@ class Encoder(nn.Module):
         for down, pre_quantize, quantize in reversed(list(zip(downsampled, self.pre_quantize, self.quantize))):
             quantizations.append((quantization := quantize(pre_quantize(down, aux))))
 
-            _, aux, _, _, _ = quantization
+            _, aux, *_ = quantization
 
         return reversed(quantizations)
 
@@ -488,7 +474,7 @@ class FixupResBlock(torch.nn.Module):
             bias=False
         )
 
-        self.skip_conv1 = conv(
+        self.skip_conv = conv(
             in_channels=in_channels,
             out_channels=out_channels,
             kernel_size=(1 if mode != 'down' else 2),
@@ -514,7 +500,7 @@ class FixupResBlock(torch.nn.Module):
         out = self.branch_conv2(out + self.bias2a)
         out = out * self.scale + self.bias2b
 
-        out += self.skip_conv1(input) # linear projection of the input onto the output
+        out = out + self.skip_conv(input) # linear projection of the input onto the output
 
         if self.mode != 'out':
             out = self.activation(out)
@@ -528,8 +514,8 @@ class FixupResBlock(torch.nn.Module):
 
         torch.nn.init.constant_(tensor=self.branch_conv2.weight, val=0)
 
-        torch.nn.init.kaiming_normal_(self.skip_conv1.weight)
-        torch.nn.init.constant_(tensor=self.skip_conv1.bias, val=0)
+        torch.nn.init.kaiming_normal_(self.skip_conv.weight)
+        torch.nn.init.constant_(tensor=self.skip_conv.bias, val=0)
 
 
 class Quantizer(torch.nn.Module):
@@ -538,10 +524,6 @@ class Quantizer(torch.nn.Module):
 
     """
     EMA-updated Vector Quantizer
-
-    FIXME: Ugly-ass indexing of embedding table
-    FIXME: usage of torch.matmul instead of '@' operator
-    FIXME: Remove either output one-hot(TODO: check actually one-hot) or dense encoding indices
     """
     def __init__(
         self, num_embeddings : int, embedding_dim : int, commitment_cost : float, decay=0.99, laplace_alpha=1e-5
@@ -567,11 +549,11 @@ class Quantizer(torch.nn.Module):
     def embed_code(self, embed_idx):
         return F.embedding(embed_idx, self.embed)
 
-    def _update_ema(self, flat_input, encodings_one_hot):
+    def _update_ema(self, flat_input, encoding_indices):
         # buffer updates need to be in-place because of distributed
-        if self.first_pass:
-            self.cluster_size.data.add_(encodings_one_hot.sum() / self.num_embeddings)
-            self.first_pass.mul_(0)
+        encodings_one_hot = F.one_hot(
+            encoding_indices, num_classes=self.num_embeddings
+        ).type_as(flat_input)
 
         new_cluster_size = encodings_one_hot.sum(dim=0)
         dw = encodings_one_hot.T @ flat_input
@@ -596,39 +578,52 @@ class Quantizer(torch.nn.Module):
         embed_normalized = self.embed_avg / cluster_size.unsqueeze(dim=-1)
         self.embed.data.copy_(embed_normalized)
 
+    def _init_ema(self, flat_input):
+        mean = flat_input.mean(dim=0)
+        std = flat_input.std(dim=0)
+
+        if torch.distributed.is_initialized():
+            torch.distributed.all_reduce(mean)
+            torch.distributed.all_reduce(std)
+            mean /= torch.distributed.get_world_size()
+            std /= torch.distributed.get_world_size()
+
+        self.embed.mul_(std)
+        self.embed.add_(mean)
+        self.embed_avg.copy_(self.embed)
+
+        self.cluster_size.data.add_(flat_input.size(dim=0) / self.num_embeddings)
+        self.first_pass.mul_(0)
 
     @torch.cuda.amp.autocast(enabled=False)
     def forward(self, inputs):
-
         with torch.no_grad():
             channel_last = inputs.permute(0, 2, 3, 4, 1) # XXX: might not actually be necessary
             input_shape = channel_last.shape
 
             flat_input = channel_last.reshape(-1, self.embedding_dim)
 
-            distances = (
+            if self.training and self.first_pass:
+                self._init_ema(flat_input)
+
+            encoding_indices = torch.argmin(
+                # Do distance calculation inline so it immediately goes out of scope
                 (flat_input ** 2).sum(dim=1, keepdim=True)
                 + (self.embed ** 2).sum(dim=1)
-                - 2 * flat_input @ self.embed.T
+                - 2 * flat_input @ self.embed.T,
+                dim=1
             )
-
-            encoding_indices = torch.argmin(distances, dim=1)
-            encodings_one_hot = F.one_hot(
-                encoding_indices, num_classes=self.num_embeddings
-            ).type_as(inputs)
-
             quantized = self.embed_code(encoding_indices).reshape(input_shape)
 
             if self.training:
-                self._update_ema(flat_input, encodings_one_hot)
+                self._update_ema(flat_input, encoding_indices)
 
-            avg_probs = torch.mean(encodings_one_hot, dim=0)
-            perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
+            # avg_probs = torch.mean(encodings_one_hot, dim=0)
+            # perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
 
             # Cast everything back to the same order and dimensions of the input
             quantized = quantized.permute(0, 4, 1, 2, 3)
-            encodings_one_hot = encodings_one_hot.reshape((*input_shape[:-1], -1)).permute(0, 4, 1, 2, 3)
-            encoding_indices.reshape(input_shape[:-1])
+            encoding_indices = encoding_indices.reshape(input_shape[:-1])
 
         e_latent_loss = F.mse_loss(quantized.detach(), inputs)
         loss = self.commitment_cost * e_latent_loss
@@ -639,7 +634,6 @@ class Quantizer(torch.nn.Module):
         return (
             loss,
             quantized,
-            perplexity,
-            encodings_one_hot,
-            encoding_indices,
+            # perplexity,
+            encoding_indices
         )
