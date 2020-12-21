@@ -1,6 +1,6 @@
 from functools import lru_cache
 from itertools import chain, tee
-from random import shuffle, sample
+from random import shuffle, sample, randint
 from pathlib import Path
 from copy import copy
 from typing import Union, Sequence, Tuple
@@ -9,8 +9,40 @@ import nrrd
 import numpy as np
 import pytorch_lightning as pl
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Sampler, Dataset, random_split
 from monai import transforms
+
+class DepthPadAndCrop(torch.nn.Module):
+    def __init__(self, output_depth, pad_value=0, center=None):
+        '''
+        if center=None, performs random crop
+        input needs to be specified in (height, width, depth) format
+        '''
+        super(DepthPadAndCrop, self).__init__()
+        self.output_depth = output_depth
+        self.pad_value = pad_value
+        self.center = center
+
+    def forward(self, x):
+        _, _, _, d = x.shape
+
+        # Making sure to use post-padding
+        pad_size = max(0, self.output_depth - d)
+
+        radius = self.output_depth // 2
+
+        low, high = radius, (d + pad_size) - radius
+        if self.center is not None:
+            assert self.center in range(low, high+1)
+            center = self.center
+        else:
+            center = randint(low, high) # randint is inclusive w.r.t. high
+        
+        num_valid_slices = self.output_depth-pad_size
+
+        return F.pad(x, (0, pad_size, 0, 0, 0, 0))[..., :self.output_depth], num_valid_slices
+
 
 
 class CTDataModule(pl.LightningDataModule):
@@ -25,7 +57,7 @@ class CTDataModule(pl.LightningDataModule):
 
     def setup(self, stage=None):
         # transform
-        key, min_val, max_val, scale_val = 'img', -1500, 3000, 1000
+        min_val, max_val, scale_val = -1500, 3000, 1000
 
         transform = transforms.Compose([
             transforms.AddChannel(),
@@ -33,10 +65,8 @@ class CTDataModule(pl.LightningDataModule):
             transforms.ThresholdIntensity(threshold=min_val, cval=min_val, above=True),
             transforms.ScaleIntensity(minv=None, maxv=None, factor=(-1 + 1/scale_val)),
             transforms.ShiftIntensity(offset=1),
-            transforms.SpatialPad(spatial_size=(512, 512, 128), mode='constant'),
-            transforms.RandSpatialCrop(roi_size=(512, 512, 128), random_size=False),
-            # transforms.Resize(spatial_size=(256, 256, 128)),
-            transforms.ToTensor()
+            transforms.ToTensor(),
+            DepthPadAndCrop(output_depth=128),
         ])
 
         dataset = CTScanDataset(self.path, transform=transform, spacing=(0.976, 0.976, 3))
@@ -120,9 +150,11 @@ class CTScanDataset(Dataset):
         data, metadata = self.get_scan(index)
 
         if self.transform is not None:
-            data = self.transform(data)
+            out = self.transform(data)
+        else:
+            out = data
 
-        return data, -1
+        return out
 
 
 class CTSliceDataset(CTScanDataset):

@@ -117,32 +117,32 @@ class VQVAE(pl.LightningModule):
         return unreduced_loss.mean(), log_dict
 
     def loc_metric(self, batch, batch_idx, loss_f) -> Tuple[torch.Tensor, dict]:
-        x, _ = batch
+        x, num_valid_slices = batch
 
         loc, (commitment_loss, *_) = self(x)
         loc = F.softplus(loc)
 
-        # ssim before cylinder extraction because that flattens xy dimensions
-        # eval_ssim_dict = _eval_ssim3d(x, loc)
+        masks = torch.zeros_like(x, dtype=torch.bool)
+        for idx, mask in zip(num_valid_slices, masks):
+            mask[..., idx:] += True
+
+        # Set padded values to 0
+        loc = torch.masked_fill(loc, mask=masks, value=0)
 
         if self.pre_loss_f:
             loc, x = map(self.pre_loss_f, (loc, x))
 
         unreduced_recon_loss = loss_f(loc, x, reduction='none')
-        # reduced_loss = loss_f(loc, x)
 
         log_dict = {
-            # 'loss_mean': reduced_loss.detach(),
             **sub_metric_log_dict('recon_loss', unreduced_recon_loss),
             **{f'commitment_loss_{i}': commitment_loss[i] for i in range(len(commitment_loss))},
             **sub_metric_log_dict('loc', loc),
             **_eval_metrics_log_dict(orig=x, pred=loc),
-            # **eval_ssim_dict
         }
 
-        # loss = unreduced_recon_loss.mean()
         loss = unreduced_recon_loss.mean() + sum(commitment_loss)
-        # return reduced_loss, log_dict
+
         return loss, log_dict
 
     def mse(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
@@ -405,16 +405,22 @@ class Decoder(nn.Module):
 
             in_channels = embedding_dim + (before_channels if i != n_enc-1 else 0)
 
-            self.up.append(UpBlock(
-                in_channels=in_channels,
-                out_channels=after_channels,
-                n_up=n_up_per_enc,
-                mode='decoder'
-            ))
+            self.up.append(
+                UpBlock(
+                    in_channels=in_channels,
+                    out_channels=after_channels,
+                    n_up=n_up_per_enc,
+                    mode='decoder'
+                )
+            )
 
             after_channels = before_channels
 
-        self.out = FixupResBlock(base_network_channels, out_channels, mode='out')
+        self.out = nn.Sequential(
+            FixupResBlock(base_network_channels, base_network_channels, mode='same'),
+            FixupResBlock(base_network_channels, base_network_channels, mode='same'),
+            FixupResBlock(base_network_channels, out_channels, mode='out')
+        )
 
     def forward(self, quantizations):
         for i, (quantization, up) in enumerate(reversed(list(zip(quantizations, self.up)))):
@@ -445,8 +451,8 @@ class FixupResBlock(torch.nn.Module):
         assert mode in ("down", "same", "up", "out")
         self.mode = mode
 
-        # branch_channels = max(in_channels, out_channels)
-        branch_channels = out_channels
+        branch_channels = max(in_channels, out_channels)
+        # branch_channels = out_channels
 
         self.activation = activation()
 
@@ -500,7 +506,7 @@ class FixupResBlock(torch.nn.Module):
         out = self.branch_conv2(out + self.bias2a)
         out = out * self.scale + self.bias2b
 
-        out = out + self.skip_conv(input) # linear projection of the input onto the output
+        out = out + self.skip_conv(input)
 
         if self.mode != 'out':
             out = self.activation(out)

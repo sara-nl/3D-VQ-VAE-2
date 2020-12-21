@@ -32,7 +32,7 @@ def main(args: Namespace):
     train_loader = DataLoader(dataset, batch_size=1, num_workers=0, pin_memory=True)
 
     print("- Loading single CT sample")
-    single_sample, _ = next(iter(train_loader))
+    single_sample = next(iter(train_loader))
     single_sample = single_sample.cuda()
 
     print("- Loading model weights")

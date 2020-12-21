@@ -44,6 +44,13 @@ def main(args):
         val_check_interval=0.5,
         flush_logs_every_n_steps=100,
         weights_summary='full',
+
+
+        plugins='ddp_sharded',
+
+        # remove when this issue gets
+        # https://github.com/PyTorchLightning/pytorch-lightning/issues/5159
+        enable_pl_optimizer=False,
     )
     trainer.fit(model, datamodule=datamodule)
 
