@@ -110,12 +110,12 @@ class CausalConv3dAdd(nn.Module):
         depth  = self.depth_conv(F.pad(depth, pad=self.depth_pad))
         height = self.height_conv(F.pad(height, pad=self.height_pad))
         width = self.width_conv(F.pad(width, pad=self.width_pad))
-        
+
         # width = shift_backwards_3d(depth) + shift_down_3d(height) + (shift_right_3d(width) if self.mask == 'A' else width)
         width = shift_right_3d(width) if self.mask == 'A' else width
 
         return depth, height, width
-    
+
     @staticmethod
     def stacks_to_output(depth, height, width):
         return shift_backwards_3d(depth) + shift_down_3d(height) + width
@@ -213,7 +213,7 @@ if __name__ == '__main__':
     from torchvision.utils import make_grid
 
     depth, height, width = inp[:, 0][None], inp[:, 1][None], inp[:, 2][None]
-    
+
     layer_index = 10
     imgs = [torch.log(width[..., layer_index, :, :] + 1).detach()]
 
