@@ -5,7 +5,9 @@
 
 # Borrowed from https://github.com/neocxi/pixelsnail-public and ported it to PyTorch
 
+import math
 from argparse import ArgumentParser, Namespace
+from typing import Union
 
 import numpy as np
 import pytorch_lightning as pl
@@ -55,7 +57,7 @@ def shift_down_3d(input, size=1):
 def shift_right_3d(input, size=1):
     '''
     If an image is given by (b c d h w)
-    Left-Pads the image in the d dimension by `size`
+    Left-Pads the image in the w dimension by `size`
     [[[1,2],
       [3,4]],
      [[5,6],
@@ -70,11 +72,61 @@ def shift_right_3d(input, size=1):
     return F.pad(input, (size, 0, 0, 0, 0, 0))[..., :w]
 
 
+class CausalConv3dAdd(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        bias: bool = True,
+        mask: str = 'B'
+    ):
+        super(CausalConv3dAdd, self).__init__()
+        assert mask in ('A', 'B')
+        self.mask = mask
+
+        assert kernel_size % 2 == 1, "even kernel sizes are not supported"
+        assert kernel_size >= 3
+        depth_size = kernel_size-1
+        height_size = kernel_size-1
+        width_size = kernel_size//2 + (1 if mask == 'B' else 0)
+
+        self.half_kernel = kernel_size // 2
+
+        # Split depth, height, width conv into three, allowing the receptive field to grow without blindspot
+        # See https://papers.nips.cc/paper/2016/file/b1301141feffabac455e1f90a7de2054-Paper.pdf figure 1.
+        self.depth_conv = nn.Conv3d(in_channels, out_channels, kernel_size=(depth_size, kernel_size, kernel_size), bias=bias)
+        self.height_conv = nn.Conv3d(in_channels, out_channels, kernel_size=(1, height_size, kernel_size), bias=bias)
+        self.width_conv = nn.Conv3d(in_channels, out_channels, kernel_size=(1, 1, width_size), bias=bias)
+
+        # padding is always (*width, *height, *depth), i.e. (left, right, top, bottom, front, back)
+        half_kernel = kernel_size // 2
+        self.depth_pad = (half_kernel, half_kernel, half_kernel, half_kernel, depth_size-1, 0)
+        self.height_pad = (half_kernel, half_kernel, height_size-1, 0, 0, 0)
+        self.width_pad = (width_size-1, 0, 0, 0, 0, 0)
+
+
+    def forward(self, depth, height, width):
+        depth  = self.depth_conv(F.pad(depth, pad=self.depth_pad))
+        height = self.height_conv(F.pad(height, pad=self.height_pad))
+        width = self.width_conv(F.pad(width, pad=self.width_pad))
+        
+        # width = shift_backwards_3d(depth) + shift_down_3d(height) + (shift_right_3d(width) if self.mask == 'A' else width)
+        width = shift_right_3d(width) if self.mask == 'A' else width
+
+        return depth, height, width
+    
+    @staticmethod
+    def stacks_to_output(depth, height, width):
+        return shift_backwards_3d(depth) + shift_down_3d(height) + width
+
 class PixelSNAIL(pl.LightningModule):
     def __init__(self, args):
         super(PixelSNAIL, self).__init__()
         self.save_hyperparameters()
         self._parse_input_args(args)
+
+        self.mask_a = CausalConv3d(self.main_dim, 32, emulated_kernel_size=5, mask='A')
 
         self.layers = nn.Sequential(
             nn.Conv3d(self.main_dim, self.main_dim // 2, kernel_size=3, padding=1),
@@ -140,5 +192,36 @@ class PixelSNAIL(pl.LightningModule):
     def forward(self, data, condition=None, cache=None):
         return self.layers(rearrange(
             F.one_hot(data, num_classes=self.main_dim),
-            'b d h w c -> b c d h w'
+            'b h w d c -> b c d h w'
         ).to(torch.float))
+
+if __name__ == '__main__':
+    inp = torch.zeros((1, 3, 20,20,20))
+
+    inp[0, :, 9, 9, 9] = 1
+
+    a_mask = CausalConv3dAdd(1, 1, 3, bias=False, mask='A')
+    b_mask = CausalConv3dAdd(1, 1, 3, bias=False, mask='B')
+
+
+    for layer in (a_mask, b_mask):
+        layer.depth_conv.weight[:] = 1
+        layer.height_conv.weight[:] = 1
+        layer.width_conv.weight[:] = 1
+
+    import matplotlib.pyplot as plt
+    from torchvision.utils import make_grid
+
+    depth, height, width = inp[:, 0][None], inp[:, 1][None], inp[:, 2][None]
+    
+    layer_index = 10
+    imgs = [torch.log(width[..., layer_index, :, :] + 1).detach()]
+
+    depth, height, width = a_mask(depth=depth, height=height, width=height)
+    for i in range(1, 10):
+        imgs.append(torch.log(CausalConv3dAdd.stacks_to_output(depth, height, width)[..., layer_index, :, :] + 1).detach())
+        depth, height, width = b_mask(depth, height, width)
+
+    plot = make_grid(torch.cat(imgs), nrow=5, padding=0)
+    plt.imshow(plot[0])
+    plt.show()
