@@ -8,13 +8,14 @@
 import math
 from argparse import ArgumentParser, Namespace
 from typing import Union
+from operator import add
 
 import numpy as np
 import pytorch_lightning as pl
 import torch
 from torch import nn
 from torch.nn import functional as F
-from einops import rearrange
+from einops import rearrange, repeat
 
 from utils.logging_helpers import sub_metric_log_dict
 
@@ -72,6 +73,48 @@ def shift_right_3d(input, size=1):
     return F.pad(input, (size, 0, 0, 0, 0, 0))[..., :w]
 
 
+class CausalResBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        activation = nn.ELU
+    ):
+        super(CausalResBlock, self).__init__()
+        branch_channels = max(in_channels, out_channels)
+        self.conv1 = CausalConv3dAdd(
+            in_channels=in_channels, out_channels=branch_channels, kernel_size=kernel_size
+        )
+
+        self.conv2 = CausalConv3dAdd(
+            in_channels=branch_channels, out_channels=out_channels, kernel_size=kernel_size
+        )
+
+        self.skip_conv = CausalConv3dAdd(
+            in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size
+        ) if in_channels != out_channels else None
+
+        self.activation = activation()
+
+    def forward(self, depth, height, width):
+        # Super ugly, but computationally better than to have to call torch.chunk + torch.cat every forward pass
+        depth_out, height_out, width_out = self.conv1(depth, height, width)
+        depth_out, height_out, width_out = map(self.activation, (depth_out, height_out, width_out))
+        depth_out, height_out, width_out = self.conv2(depth_out, height_out, width_out)
+
+        # linear projection of input to output if in/out channels are not equal
+        if self.skip_conv is not None:
+            depth, height, width = self.skip_conv(depth, height, width)
+
+        # skip connection
+        depth_out, height_out, width_out = depth_out+depth, height_out+height, width_out+width
+
+        depth_out, height_out, width_out = map(self.activation, (depth_out, height_out, width_out))
+
+        return depth_out, height_out, width_out
+
+
 class CausalConv3dAdd(nn.Module):
     def __init__(
         self,
@@ -117,6 +160,10 @@ class CausalConv3dAdd(nn.Module):
         return depth, height, width
 
     @staticmethod
+    def input_to_stacks(input_):
+        return repeat(input_, 'b c d h w -> dim b c d h w', dim=3)
+
+    @staticmethod
     def stacks_to_output(depth, height, width):
         return shift_backwards_3d(depth) + shift_down_3d(height) + width
 
@@ -126,13 +173,18 @@ class PixelSNAIL(pl.LightningModule):
         self.save_hyperparameters()
         self._parse_input_args(args)
 
-        self.mask_a = CausalConv3d(self.main_dim, 32, emulated_kernel_size=5, mask='A')
+        self.parse_input = CausalConv3dAdd(self.input_dim, self.model_dim, kernel_size=self.kernel_size, mask='A')
 
-        self.layers = nn.Sequential(
-            nn.Conv3d(self.main_dim, self.main_dim // 2, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv3d(self.main_dim // 2, self.main_dim, kernel_size=3, padding=1)
-        )
+        self.layers = nn.ModuleList([
+            CausalResBlock(
+                in_channels=self.model_dim,
+                out_channels=self.model_dim,
+                kernel_size=self.kernel_size
+            )
+            for _ in range(self.num_resblocks)
+        ])
+
+        self.parse_output = CausalResBlock(self.model_dim, self.input_dim, kernel_size=self.kernel_size)
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, amsgrad=True)
@@ -154,8 +206,14 @@ class PixelSNAIL(pl.LightningModule):
         return loss
 
     def cross_entropy(self, batch, batch_idx):
-        data, condition = batch
-        data, condition = data.squeeze(dim=1), condition.squeeze(dim=1)
+
+        if len(batch) == 1: # no condition present
+            data = batch[0]
+            condition = None
+        else:
+            data, condition = batch
+            condition = condition.squeeze(dim=1)
+        data = data.squeeze(dim=1)
 
         logits = self(data, condition=condition)
 
@@ -168,19 +226,30 @@ class PixelSNAIL(pl.LightningModule):
         return unreduced_loss.mean(), log_dict
 
     def _parse_input_args(self, args: Namespace):
+
+        self.input_dim, self.condition_dim = args.num_embeddings
+
+        # TODO: replace with attrsetter
+        self.model_dim = args.model_dim
+        self.kernel_size = args.kernel_size
+        self.num_resblocks = args.num_resblocks
+
         if args.metric == 'cross_entropy':
             self.loss_f = self.cross_entropy
         else:
             raise ValueError
 
+
         self.lr = args.lr
-        self.main_dim, self.condition_dim = args.num_embeddings
 
     @classmethod
     def add_model_specific_args(cls, parent_parser):
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
 
         # Model specific arguments
+        parser.add_argument('--model-dim', default=32)
+        parser.add_argument('--kernel-size', default=3)
+        parser.add_argument('--num-resblocks', default=5)
 
         # Loss calculation specific
         parser.add_argument('--metric', choices=['cross_entropy'])
@@ -190,38 +259,14 @@ class PixelSNAIL(pl.LightningModule):
         return parser
 
     def forward(self, data, condition=None, cache=None):
-        return self.layers(rearrange(
-            F.one_hot(data, num_classes=self.main_dim),
-            'b h w d c -> b c d h w'
-        ).to(torch.float))
+        depth, height, width = CausalConv3dAdd.input_to_stacks(
+            rearrange(F.one_hot(data, num_classes=self.input_dim),
+                      'b d h w c -> b c d h w').to(torch.float)
+        )
 
-if __name__ == '__main__':
-    inp = torch.zeros((1, 3, 20,20,20))
+        depth, height, width = self.parse_input(depth, height, width)
 
-    inp[0, :, 9, 9, 9] = 1
+        for layer in self.layers:
+            depth, height, width = layer(depth, height, width)
 
-    a_mask = CausalConv3dAdd(1, 1, 3, bias=False, mask='A')
-    b_mask = CausalConv3dAdd(1, 1, 3, bias=False, mask='B')
-
-
-    for layer in (a_mask, b_mask):
-        layer.depth_conv.weight[:] = 1
-        layer.height_conv.weight[:] = 1
-        layer.width_conv.weight[:] = 1
-
-    import matplotlib.pyplot as plt
-    from torchvision.utils import make_grid
-
-    depth, height, width = inp[:, 0][None], inp[:, 1][None], inp[:, 2][None]
-
-    layer_index = 10
-    imgs = [torch.log(width[..., layer_index, :, :] + 1).detach()]
-
-    depth, height, width = a_mask(depth=depth, height=height, width=height)
-    for i in range(1, 10):
-        imgs.append(torch.log(CausalConv3dAdd.stacks_to_output(depth, height, width)[..., layer_index, :, :] + 1).detach())
-        depth, height, width = b_mask(depth, height, width)
-
-    plot = make_grid(torch.cat(imgs), nrow=5, padding=0)
-    plt.imshow(plot[0])
-    plt.show()
+        return CausalConv3dAdd.stacks_to_output(*self.parse_output(depth, height, width))
