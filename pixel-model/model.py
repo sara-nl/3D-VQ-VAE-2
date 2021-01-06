@@ -1,15 +1,7 @@
-# Copyright (c) Xi Chen
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-
-# Borrowed from https://github.com/neocxi/pixelsnail-public and ported it to PyTorch
-
 import math
 from argparse import ArgumentParser, Namespace
 from typing import Union
 from operator import add, mul, attrgetter
-from itertools import starmap
 
 import numpy as np
 import pytorch_lightning as pl
@@ -20,11 +12,6 @@ from einops import rearrange, repeat
 
 from utils.logging_helpers import sub_metric_log_dict
 
-def add_scalar_to_stack(bias, stack):
-    return starmap(add, product((bias,), stack))
-
-def multiply_scalar_with_stack(scale, stack):
-    return starmap(mul, product((scale,), stack))
 
 def shift_backwards_3d(input, size=1):
     '''
@@ -124,30 +111,10 @@ class FixupCausalResBlock(nn.Module):
 
         out = out + (stack if self.skip_conv is None else self.skip_conv(stack))
 
-
         if not self.out:
             out = self.activation(out)
 
         return out
-        # A bit ugly, but computationally probably better
-        # than to have to call torch.chunk + torch.cat every forward pass
-        # Maybe slicing one big tensor every pass is faster?
-
-        # stack_out = self.branch_conv1(*add_scalar_to_stack(self.bias_1a, stack))
-        # stack_out = map(self.activation, add_scalar_to_stack(self.bias1b, stack_out))
-
-        # stack_out = self.branch_conv2(*add_scalar_to_stack(self.bias2a, stack))
-        # stack_out = add_scalar_to_stack(self.bias2b, multiply_scalar_with_stack(self.scale, stack))
-
-        # # skip connection
-        # stack_out = starmap(add, zip(stack_out, stack))
-
-        # if not self.out:
-        #     stack_out = map(self.activation, stack_out)
-        # else:
-        #     stack_out = tuple(stack_out)
-
-        # return stack_out
 
     def initialize_weights(self, num_layers):
         m = 2 # number of convs in a branch
