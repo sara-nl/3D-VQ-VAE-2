@@ -61,6 +61,63 @@ def shift_right_3d(input, size=1):
     return F.pad(input, (size, 0, 0, 0, 0, 0))[..., :w]
 
 
+class CausalConv3dAdd(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        bias: bool = True,
+        mask: str = 'B',
+    ):
+        super(CausalConv3dAdd, self).__init__()
+        assert mask in ('A', 'B')
+        self.mask = mask
+
+        assert kernel_size > 0
+        assert kernel_size % 2 == 1, "even kernel sizes are not supported"
+
+        # Making sure kernel size is at least 1
+        depth_size  = max(kernel_size-1, 1)
+        height_size = max(kernel_size-1, 1)
+        width_size  = max(kernel_size//2 + (1 if mask == 'B' else 0), 1)
+
+        self.half_kernel = kernel_size // 2
+
+        # Split depth, height, width conv into three, allowing the receptive field to grow without blindspot
+        # See https://papers.nips.cc/paper/2016/file/b1301141feffabac455e1f90a7de2054-Paper.pdf figure 1.
+        self.depth_conv = nn.Conv3d(in_channels, out_channels, kernel_size=(depth_size, kernel_size, kernel_size), bias=bias)
+        self.height_conv = nn.Conv3d(in_channels, out_channels, kernel_size=(1, height_size, kernel_size), bias=bias)
+        self.width_conv = nn.Conv3d(in_channels, out_channels, kernel_size=(1, 1, width_size), bias=bias)
+
+        # padding is always (*width, *height, *depth), i.e. (left, right, top, bottom, front, back)
+        half_kernel = kernel_size // 2
+        self.depth_pad = (half_kernel, half_kernel, half_kernel, half_kernel, depth_size-1, 0)
+        self.height_pad = (half_kernel, half_kernel, height_size-1, 0, 0, 0)
+        self.width_pad = (width_size-1, 0, 0, 0, 0, 0)
+
+
+    def forward(self, stack):
+        depth, height, width = stack
+
+        depth  = self.depth_conv(F.pad(depth, pad=self.depth_pad))
+        height = self.height_conv(F.pad(height, pad=self.height_pad))
+        width = self.width_conv(F.pad(width, pad=self.width_pad))
+
+        width = shift_right_3d(width) if self.mask == 'A' else width
+
+        return rearrange([depth, height, width], 'dim b c d h w -> dim b c d h w')
+
+    @staticmethod
+    def input_to_stack(input_):
+        return repeat(input_, 'b c d h w -> dim b c d h w', dim=3)
+
+    @staticmethod
+    def stack_to_output(stack):
+        depth, height, width = stack
+        return shift_backwards_3d(depth) + shift_down_3d(height) + width
+
+
 class FixupCausalResBlock(nn.Module):
     def __init__(
         self,
@@ -146,60 +203,3 @@ class FixupCausalResBlock(nn.Module):
             bias_getter = attrgetter('depth_conv.bias', 'height_conv.bias', 'width_conv.bias')
             for bias in bias_getter(self.skip_conv):
                 torch.nn.init.constant_(tensor=bias, val=0)
-
-
-class CausalConv3dAdd(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: int,
-        bias: bool = True,
-        mask: str = 'B',
-    ):
-        super(CausalConv3dAdd, self).__init__()
-        assert mask in ('A', 'B')
-        self.mask = mask
-
-        assert kernel_size > 0
-        assert kernel_size % 2 == 1, "even kernel sizes are not supported"
-
-        # Making sure kernel size is at least 1
-        depth_size  = max(kernel_size-1, 1)
-        height_size = max(kernel_size-1, 1)
-        width_size  = max(kernel_size//2 + (1 if mask == 'B' else 0), 1)
-
-        self.half_kernel = kernel_size // 2
-
-        # Split depth, height, width conv into three, allowing the receptive field to grow without blindspot
-        # See https://papers.nips.cc/paper/2016/file/b1301141feffabac455e1f90a7de2054-Paper.pdf figure 1.
-        self.depth_conv = nn.Conv3d(in_channels, out_channels, kernel_size=(depth_size, kernel_size, kernel_size), bias=bias)
-        self.height_conv = nn.Conv3d(in_channels, out_channels, kernel_size=(1, height_size, kernel_size), bias=bias)
-        self.width_conv = nn.Conv3d(in_channels, out_channels, kernel_size=(1, 1, width_size), bias=bias)
-
-        # padding is always (*width, *height, *depth), i.e. (left, right, top, bottom, front, back)
-        half_kernel = kernel_size // 2
-        self.depth_pad = (half_kernel, half_kernel, half_kernel, half_kernel, depth_size-1, 0)
-        self.height_pad = (half_kernel, half_kernel, height_size-1, 0, 0, 0)
-        self.width_pad = (width_size-1, 0, 0, 0, 0, 0)
-
-
-    def forward(self, stack):
-        depth, height, width = stack
-
-        depth  = self.depth_conv(F.pad(depth, pad=self.depth_pad))
-        height = self.height_conv(F.pad(height, pad=self.height_pad))
-        width = self.width_conv(F.pad(width, pad=self.width_pad))
-
-        width = shift_right_3d(width) if self.mask == 'A' else width
-
-        return rearrange([depth, height, width], 'dim b c d h w -> dim b c d h w')
-
-    @staticmethod
-    def input_to_stack(input_):
-        return repeat(input_, 'b c d h w -> dim b c d h w', dim=3)
-
-    @staticmethod
-    def stack_to_output(stack):
-        depth, height, width = stack
-        return shift_backwards_3d(depth) + shift_down_3d(height) + width
