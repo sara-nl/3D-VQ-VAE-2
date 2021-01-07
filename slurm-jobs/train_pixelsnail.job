@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name pixelsnail-mid-no-condition-fixup-optional-skipconv
+#SBATCH --job-name pixelsnail-mid-no-condition-low-dropout-init-fix
 #SBATCH -N 2
 #SBATCH --tasks-per-node 4
 #SBATCH -t 5-00:00:00
@@ -11,7 +11,7 @@ export OMP_NUM_THREADS=6
 
 # Flags made to be edited
 HIERARCHY_LEVEL="1" # Should be a non-negative integer
-DATASET_NAME="version_6991397_last_hotfixed.lmdb"
+DATASET_NAME="version_7145273_last.lmdb"
 CONDA_ENV="pytorch1.7"
 METRIC="cross_entropy"
 
@@ -76,10 +76,11 @@ $DATASET_INDIR \
 $HIERARCHY_LEVEL \
 --batch-size 2 \
 --metric $METRIC \
---lr "$NUM_NODES"e-4 \
+--lr "$(( $NUM_NODES * 5 ))"e-5 \
 --num_nodes $NUM_NODES \
 --num-resblocks 50 \
---model-dim 256
+--model-dim 256 \
+--dropout-prob 0.25 \
 "
 echo "- found args $PYTHON_ARGS"
 
