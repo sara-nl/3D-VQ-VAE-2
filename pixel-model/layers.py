@@ -96,7 +96,6 @@ class CausalConv3dAdd(nn.Module):
         self.height_pad = (half_kernel, half_kernel, height_size-1, 0, 0, 0)
         self.width_pad = (width_size-1, 0, 0, 0, 0, 0)
 
-
     def forward(self, stack):
         depth, height, width = stack
 
@@ -203,3 +202,113 @@ class FixupCausalResBlock(nn.Module):
             bias_getter = attrgetter('depth_conv.bias', 'height_conv.bias', 'width_conv.bias')
             for bias in bias_getter(self.skip_conv):
                 torch.nn.init.constant_(tensor=bias, val=0)
+
+
+class PreActivationFixupCausalResBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        mask: str = 'B',  # options are ('A', 'B')
+        condition_dim: int = 0,
+        activation: Callable = nn.SiLU,
+        use_dropout: bool = True,
+        dropout_prob: float = 0.5,
+        out: bool = False, # Doesn't do anything
+    ):
+        super(PreActivationFixupCausalResBlock, self).__init__()
+
+        self.out = out
+
+        self.bias1a, self.bias1b, self.bias2a, self.bias2b, self.bias3a, self.bias3b, self.bias4 = (
+            nn.Parameter(torch.zeros(1)) for _ in range(7)
+        )
+        self.scale = nn.Parameter(torch.ones(1))
+
+        branch_channels = max(in_channels, out_channels)
+        self.branch_conv1 = CausalConv3dAdd(
+            in_channels=in_channels, out_channels=branch_channels, kernel_size=1, mask=mask, bias=False
+        )
+
+        # second conv in the branch is always ok to be 'B'
+        self.branch_conv2 = CausalConv3dAdd(
+            in_channels=branch_channels, out_channels=branch_channels, kernel_size=kernel_size, mask='B', bias=False
+        )
+
+        # same for third
+        self.branch_conv3 = CausalConv3dAdd(
+            in_channels=branch_channels, out_channels=out_channels, kernel_size=1, mask='B', bias=False
+        )
+
+        # 1x1x1 conv for channel dim projection
+        # Also needed if mask == 'A', since otherwise causality is broken
+        self.skip_conv = CausalConv3dAdd(
+            in_channels=in_channels, out_channels=out_channels, kernel_size=1, mask=mask, bias=True
+        ) if (in_channels != out_channels or mask == 'A') else None
+
+        if condition_dim > 0:
+            condition_kernel_size = 3
+            self.condition = nn.Conv3d(
+                in_channels=condition_dim,
+                out_channels=branch_channels,
+                kernel_size=condition_kernel_size,
+                padding=condition_kernel_size // 2
+            )
+
+        self.activation = activation()
+
+        self.dropout = nn.Dropout3d(dropout_prob) if use_dropout else None
+
+    def forward(self, stack, *, condition=None):
+        out = self.activation(stack + self.bias1a)
+        out = self.branch_conv1(out + self.bias1b)
+
+        if condition is not None:
+            assert self.condition is not None, 'Condition projection matrix not initialised!'
+            out = out + self.condition(condition)
+
+        out = self.activation(out + self.bias2a)
+        out = self.branch_conv2(out + self.bias2b)
+
+        if self.dropout is not None:
+            out = self.dropout(out)
+
+        out = self.activation(out + self.bias3a)
+        out = self.branch_conv3(out + self.bias3b)
+
+        out = out * self.scale + self.bias4
+
+        out = out + (stack if self.skip_conv is None else self.skip_conv(stack))
+
+        return out
+
+    @torch.no_grad()
+    def initialize_weights(self, num_layers):
+        m = 2 # number of convs in a branch
+
+        weight_getter = attrgetter('depth_conv.weight', 'height_conv.weight', 'width_conv.weight')
+
+        # branch_conv1
+        for weight in weight_getter(self.branch_conv1):
+            torch.nn.init.normal_(
+                weight,
+                mean=0,
+                std=np.sqrt(2 / (weight.shape[0] * np.prod(weight.shape[2:]))) * num_layers ** (-0.5)
+            )
+            # torch.nn.init.kaiming_normal_(weight).mul_(num_layers ** (-1 / (2*m - m)))
+
+        # branch_conv2
+        for weight in map(weight_getter, (self.branch_conv2, self.branch_conv3)):
+            torch.nn.init.constant_(weight, val=0)
+
+        # skip_conv
+        if self.skip_conv is not None:
+            for weight in weight_getter(self.skip_conv):
+                # init_method = torch.nn.init.kaiming_normal_ if not self.out else torch.nn.init.xavier_normal_
+                init_method = torch.nn.init.xavier_normal_
+                init_method(weight)
+            bias_getter = attrgetter('depth_conv.bias', 'height_conv.bias', 'width_conv.bias')
+            for bias in bias_getter(self.skip_conv):
+                torch.nn.init.constant_(tensor=bias, val=0)
+

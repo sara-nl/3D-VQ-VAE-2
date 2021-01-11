@@ -11,7 +11,7 @@ from torch.nn import functional as F
 from einops import rearrange, repeat
 from pytorch_lightning.metrics import Accuracy, Precision, Recall
 
-from layers import FixupCausalResBlock, CausalConv3dAdd
+from layers import FixupCausalResBlock, PreActivationFixupCausalResBlock, CausalConv3dAdd
 from utils.logging_helpers import sub_metric_log_dict
 
 
@@ -37,7 +37,7 @@ class PixelSNAIL(pl.LightningModule):
             'recall': Recall(num_classes=self.input_dim),
         })
 
-        self.parse_input = FixupCausalResBlock(
+        self.parse_input = self.causal_conv(
             in_channels=self.input_dim,
             out_channels=self.model_dim,
             kernel_size=self.kernel_size,
@@ -47,7 +47,7 @@ class PixelSNAIL(pl.LightningModule):
         )
 
         self.layers = nn.ModuleList([
-            FixupCausalResBlock(
+            self.causal_conv(
                 in_channels=self.model_dim,
                 out_channels=self.model_dim,
                 kernel_size=self.kernel_size,
@@ -58,7 +58,7 @@ class PixelSNAIL(pl.LightningModule):
             for _ in range(self.num_resblocks)
         ])
 
-        self.parse_output = FixupCausalResBlock(
+        self.parse_output = self.causal_conv(
             in_channels=self.model_dim,
             out_channels=self.input_dim,
             kernel_size=self.kernel_size,
@@ -125,6 +125,13 @@ class PixelSNAIL(pl.LightningModule):
         self.num_resblocks = args.num_resblocks
         self.use_dropout = args.use_dropout
         self.dropout_prob = args.dropout_prob
+        self.use_conditioning = args.use_conditioning
+
+        self.causal_conv = (
+            PreActivationFixupCausalResBlock
+            if args.use_pre_activation
+            else FixupCausalResBlock
+        )
 
         if args.metric == 'cross_entropy':
             self.loss_f = self.cross_entropy
@@ -143,6 +150,8 @@ class PixelSNAIL(pl.LightningModule):
         parser.add_argument('--num-resblocks', default=5, type=int)
         parser.add_argument('--use-dropout', default=True, type=bool)
         parser.add_argument('--dropout-prob', default=0.5, type=float)
+        parser.add_argument('--use-pre-activation', default=False, type=bool)
+        parser.add_argument('--use-conditioning', default=False, type=bool)
 
         # Loss calculation specific
         parser.add_argument('--metric', choices=['cross_entropy'])
@@ -157,9 +166,15 @@ class PixelSNAIL(pl.LightningModule):
                       'b d h w c -> b c d h w').to(torch.float)
         )
 
-        stack = self.parse_input(stack)
+        if condition is not None:
+            condition = rearrange(
+                F.one_hot(data, num_classes=self.input_dim),
+                'b d h w c -> b c d h w'
+            ).to(torch.float)
+
+        stack = self.parse_input(stack, condition=condition)
 
         for layer in self.layers:
-            stack = layer(stack)
+            stack = layer(stack, condition=condition)
 
         return CausalConv3dAdd.stack_to_output(self.parse_output(stack))

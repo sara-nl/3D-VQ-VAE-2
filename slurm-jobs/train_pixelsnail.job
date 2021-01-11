@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name pixelsnail-mid-no-condition-low-dropout-init-fix
+#SBATCH --job-name pixelsnail-mid-no-condition-init-fix-pre-activation-swish
 #SBATCH -N 2
 #SBATCH --tasks-per-node 4
 #SBATCH -t 5-00:00:00
@@ -78,9 +78,10 @@ $HIERARCHY_LEVEL \
 --metric $METRIC \
 --lr "$(( $NUM_NODES * 5 ))"e-5 \
 --num_nodes $NUM_NODES \
---num-resblocks 50 \
+--num-resblocks 53 \
 --model-dim 256 \
---dropout-prob 0.25 \
+--dropout-prob 0.5 \
+--use-pre-activation True \
 "
 echo "- found args $PYTHON_ARGS"
 
