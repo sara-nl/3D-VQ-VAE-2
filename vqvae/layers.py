@@ -322,7 +322,6 @@ class Quantizer(torch.nn.Module):
         self.cluster_size.data.add_(flat_input.size(dim=0) / self.num_embeddings)
         self.first_pass.mul_(0)
 
-    @torch.cuda.amp.autocast(enabled=False)
     def forward(self, inputs):
         with torch.no_grad():
             channel_last = inputs.permute(0, 2, 3, 4, 1) # XXX: might not actually be necessary
@@ -333,13 +332,7 @@ class Quantizer(torch.nn.Module):
             if self.training and self.first_pass:
                 self._init_ema(flat_input)
 
-            encoding_indices = torch.argmin(
-                # Do distance calculation inline so it immediately goes out of scope
-                (flat_input ** 2).sum(dim=1, keepdim=True)
-                + (self.embed ** 2).sum(dim=1)
-                - 2 * flat_input @ self.embed.T,
-                dim=1
-            )
+            encoding_indices = torch.argmin(torch.cdist(flat_input, self.embed), dim=1)
             quantized = self.embed_code(encoding_indices).reshape(input_shape)
 
             if self.training:
