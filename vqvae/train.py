@@ -22,7 +22,6 @@ def parse_arguments():
 
     parser.set_defaults(
         gpus="-1",
-        # auto_select_gpus=True,
         distributed_backend='ddp',
 
         benchmark=True,
@@ -30,15 +29,12 @@ def parse_arguments():
         num_sanity_val_steps=0,
         precision=16,
 
-        terminate_on_nan=True,
-
-        profiler=None,
-
         log_every_n_steps=50,
         val_check_interval=0.5,
         flush_logs_every_n_steps=100,
         weights_summary='full',
 
+        move_metrics_to_cpu=True,
 
         # plugins='ddp_sharded',
     )

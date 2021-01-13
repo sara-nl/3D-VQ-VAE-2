@@ -72,7 +72,6 @@ $DATASET_INDIR \
 --input-channels 1 \
 --metric $METRIC \
 --base_lr "$NUM_NODES"e-5 \
---accumulate_grad_batches 1 \
 --num-embeddings 512 \
 --num_nodes $NUM_NODES \
 "

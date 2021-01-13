@@ -66,7 +66,6 @@ class CTDataModule(pl.LightningDataModule):
             transforms.ScaleIntensity(minv=None, maxv=None, factor=(-1 + 1/scale_val)),
             transforms.ShiftIntensity(offset=1),
             transforms.ToTensor(),
-            # torch.nn.Softplus(),
             DepthPadAndCrop(output_depth=128), # needs to be last because it outputs the label
         ])
 

@@ -14,7 +14,7 @@ from torch.distributions.normal import Normal
 from layers import Encoder, Decoder, FixupResBlock
 from utils import ExtractCenterCylinder
 from metrics.distribution import Logistic, mixture_nll_loss, generic_nll_loss
-from metrics.evaluate import nmse, psnr
+from metrics.evaluate import nmse, psnr, SSIM3DSlices
 from utils import sub_metric_log_dict
 
 
@@ -57,6 +57,13 @@ class VQVAE(pl.LightningModule):
             n_up_per_enc=self.n_blocks_per_bottleneck,
         )
 
+        self.train_pre_loss_f_metrics = nn.ModuleDict({
+            'ssim': SSIM3DSlices(),
+        })
+        self.val_pre_loss_f_metrics = nn.ModuleDict({
+            'ssim': SSIM3DSlices(),
+        })
+
         self.apply(lambda layer: layer.initialize_weights(num_layers=self.num_layers) if isinstance(layer, FixupResBlock) else None)
 
     def forward(self, data):
@@ -84,9 +91,14 @@ class VQVAE(pl.LightningModule):
     def shared_step(self, batch, batch_idx, mode='train'):
         assert mode in ('train', 'val')
 
-        loss, log_dict = self.recon_loss_f(batch, batch_idx)
+        pre_loss_f_metrics = (
+            self.train_pre_loss_f_metrics
+            if mode == 'train'
+            else self.val_pre_loss_f_metrics
+        )
 
-        self.log_dict({f'{mode}_{key}': val for key, val in log_dict.items()})
+        loss, log_dict = self.recon_loss_f(batch, batch_idx, **pre_loss_f_metrics)
+        self.log_dict({f'{mode}_{key}': val for key, val in log_dict.items()}, logger=True)
 
         return loss
 
@@ -109,44 +121,54 @@ class VQVAE(pl.LightningModule):
 
         return unreduced_loss.mean(), log_dict
 
-    def loc_metric(self, batch, batch_idx, loss_f) -> Tuple[torch.Tensor, dict]:
+    def loc_metric(self, batch, batch_idx, loss_f, **pre_loss_f_metrics) -> Tuple[torch.Tensor, dict]:
         x, num_valid_slices = batch
 
         loc, (commitment_loss, *_) = self(x)
         # loc = F.softplus(loc)
 
-        masks = torch.zeros_like(x, dtype=torch.bool)
-        for idx, mask in zip(num_valid_slices, masks):
-            mask[..., idx:] += True
+        with torch.no_grad():
+            masks = torch.zeros_like(x, dtype=torch.bool)
+            for idx, mask in zip(num_valid_slices, masks):
+                mask[..., idx:] += True
 
-        # Set padded values to 0
-        loc = torch.masked_fill(loc, mask=masks, value=0)
+            # Set padded values to 0
+            loc = torch.masked_fill(loc, mask=masks, value=0)
 
-        if self.pre_loss_f:
-            loc, x = map(self.pre_loss_f, (loc, x))
+            # Pre loss metrics need full 3d
+            log_dict = {
+                k: v for d in
+                (sub_metric_log_dict(metric_name, metric(loc, x)) for metric_name, metric in pre_loss_f_metrics.items())
+                for k, v in d.items()
+            }
+
+            if self.pre_loss_f:
+                loc, x = map(self.pre_loss_f, (loc, x))
 
         unreduced_recon_loss = loss_f(loc, x, reduction='none')
 
-        log_dict = {
-            **sub_metric_log_dict('recon_loss', unreduced_recon_loss),
-            **{f'commitment_loss_{i}': commitment_loss[i] for i in range(len(commitment_loss))},
-            **sub_metric_log_dict('loc', loc),
-            **_eval_metrics_log_dict(orig=x, pred=loc),
-        }
+        with torch.no_grad():
+            log_dict = {
+                **log_dict,
+                **sub_metric_log_dict('recon_loss', unreduced_recon_loss),
+                **{f'commitment_loss_{i}': commitment_loss[i] for i in range(len(commitment_loss))},
+                **sub_metric_log_dict('loc', loc),
+                **_eval_metrics_log_dict(orig=x, pred=loc),
+            }
 
         loss = unreduced_recon_loss.mean() + sum(commitment_loss)
 
         return loss, log_dict
 
-    def mse(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
-        return self.loc_metric(batch, batch_idx, F.mse_loss)
+    def mse(self, batch, batch_idx, **pre_loss_f_metrics) -> Tuple[torch.Tensor, dict]:
+        return self.loc_metric(batch, batch_idx, F.mse_loss, **pre_loss_f_metrics)
 
-    def rmsle(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
+    def rmsle(self, batch, batch_idx, **pre_loss_f_metrics) -> Tuple[torch.Tensor, dict]:
         def sle_loss(pred, actual, reduction='none'):
             assert reduction == 'none'
             return (((pred + 1).log() - (actual + 1).log()) ** 2)
 
-        msle, log_dict = self.loc_metric(batch, batch_idx, sle_loss)
+        msle, log_dict = self.loc_metric(batch, batch_idx, sle_loss, **pre_loss_f_metrics)
 
         for key, value in log_dict.items():
             if 'loss' in key:
@@ -154,8 +176,8 @@ class VQVAE(pl.LightningModule):
 
         return msle.sqrt(), log_dict
 
-    def rmse(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
-        mse, log_dict = self.mse(batch, batch_idx)
+    def rmse(self, batch, batch_idx, **pre_loss_f_metrics) -> Tuple[torch.Tensor, dict]:
+        mse, log_dict = self.mse(batch, batch_idx, **pre_loss_f_metrics)
 
         for key, value in log_dict.items():
             if 'loss' in key:
@@ -163,11 +185,11 @@ class VQVAE(pl.LightningModule):
 
         return mse.sqrt(), log_dict
 
-    def mae(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
-        return self.loc_metric(batch, batch_idx, F.l1_loss)
+    def mae(self, batch, batch_idx, **pre_loss_f_metrics) -> Tuple[torch.Tensor, dict]:
+        return self.loc_metric(batch, batch_idx, F.l1_loss, **pre_loss_f_metrics)
 
-    def huber(self, batch, batch_idx) -> Tuple[torch.Tensor, dict]:
-        return self.loc_metric(batch, batch_idx, F.smooth_l1_loss)
+    def huber(self, batch, batch_idx, **pre_loss_f_metrics) -> Tuple[torch.Tensor, dict]:
+        return self.loc_metric(batch, batch_idx, F.smooth_l1_loss, **pre_loss_f_metrics)
 
     def loc_scale_mixture_nll(self, batch, batch_idx, loc_scale_dist) -> Tuple[torch.Tensor, dict]:
         x, _ = batch
