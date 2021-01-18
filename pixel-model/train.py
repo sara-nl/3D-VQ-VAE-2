@@ -27,8 +27,6 @@ def parse_arguments():
         num_sanity_val_steps=0,
         precision=16,
 
-        terminate_on_nan=True,
-
         log_every_n_steps=50,
         val_check_interval=0.5,
         flush_logs_every_n_steps=100,
@@ -62,5 +60,4 @@ def main(args):
 
 if __name__ == '__main__':
     args = parse_arguments()
-
     main(args)

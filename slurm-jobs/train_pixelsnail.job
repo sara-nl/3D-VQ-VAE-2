@@ -1,16 +1,16 @@
 #!/bin/bash
 
-#SBATCH --job-name pixelsnail-mid-no-condition-init-fix-pre-activation-swish
+#SBATCH --job-name pixelsnail-mid-no-condition-swish-pre-act-bottleneck
 #SBATCH -N 2
 #SBATCH --tasks-per-node 4
-#SBATCH -t 5-00:00:00
+#SBATCH -t 2-00:00:00
 #SBATCH -p gpu_titanrtx
 #SBATCH -o slurm-%j-%x.out
 #SBATCh -e slurm-%j-%x.out
 export OMP_NUM_THREADS=6
 
 # Flags made to be edited
-HIERARCHY_LEVEL="1" # Should be a non-negative integer
+HIERARCHY_LEVEL="0" # Should be a non-negative integer
 DATASET_NAME="version_7145273_last.lmdb"
 CONDA_ENV="pytorch1.7"
 METRIC="cross_entropy"
@@ -78,10 +78,12 @@ $HIERARCHY_LEVEL \
 --metric $METRIC \
 --lr "$(( $NUM_NODES * 5 ))"e-5 \
 --num_nodes $NUM_NODES \
---num-resblocks 53 \
+--num-resblocks 50 \
 --model-dim 256 \
 --dropout-prob 0.5 \
+--use-conditioning True \
 --use-pre-activation True \
+--bottleneck-divisor 4 \
 "
 echo "- found args $PYTHON_ARGS"
 

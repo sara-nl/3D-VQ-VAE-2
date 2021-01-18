@@ -1,4 +1,4 @@
-from typing import Union, Callable
+from typing import Union, Callable, Type
 from operator import attrgetter
 
 import numpy as np
@@ -61,6 +61,15 @@ def shift_right_3d(input, size=1):
     return F.pad(input, (size, 0, 0, 0, 0, 0))[..., :w]
 
 
+def input_to_stack(input: torch.Tensor) -> torch.Tensor:
+    return repeat(input, 'b c d h w -> dim b c d h w', dim=3)
+
+def stack_to_output(stack: torch.Tensor) -> torch.Tensor:
+    depth, height, width = stack
+    return shift_backwards_3d(depth) + shift_down_3d(height) + width
+
+
+
 class CausalConv3dAdd(nn.Module):
     def __init__(
         self,
@@ -70,7 +79,8 @@ class CausalConv3dAdd(nn.Module):
         bias: bool = True,
         mask: str = 'B',
     ):
-        super(CausalConv3dAdd, self).__init__()
+        super().__init__()
+
         assert mask in ('A', 'B')
         self.mask = mask
 
@@ -107,15 +117,6 @@ class CausalConv3dAdd(nn.Module):
 
         return rearrange([depth, height, width], 'dim b c d h w -> dim b c d h w')
 
-    @staticmethod
-    def input_to_stack(input_):
-        return repeat(input_, 'b c d h w -> dim b c d h w', dim=3)
-
-    @staticmethod
-    def stack_to_output(stack):
-        depth, height, width = stack
-        return shift_backwards_3d(depth) + shift_down_3d(height) + width
-
 
 class FixupCausalResBlock(nn.Module):
     def __init__(
@@ -125,11 +126,13 @@ class FixupCausalResBlock(nn.Module):
         kernel_size: int,
         mask: str = 'B',  # options are ('A', 'B')
         out: bool = False,
-        activation: Callable = nn.ELU,
+        activation: Type[nn.Module] = nn.ELU,
         use_dropout: bool = True,
-        dropout_prob: float = 0.5
+        dropout_prob: float = 0.5,
+        *args,
+        **kwargs
     ):
-        super(FixupCausalResBlock, self).__init__()
+        super().__init__()
 
         self.out = out
 
@@ -155,7 +158,7 @@ class FixupCausalResBlock(nn.Module):
 
         self.activation = activation()
 
-        self.dropout = nn.Dropout3d(dropout_prob) if use_dropout else None
+        self.dropout = nn.Dropout3d(dropout_prob) if dropout_prob > 0 else None
 
     def forward(self, stack):
         out = self.branch_conv1(stack + self.bias1a)
@@ -176,7 +179,6 @@ class FixupCausalResBlock(nn.Module):
 
     @torch.no_grad()
     def initialize_weights(self, num_layers):
-        m = 2 # number of convs in a branch
 
         weight_getter = attrgetter('depth_conv.weight', 'height_conv.weight', 'width_conv.weight')
 
@@ -187,7 +189,6 @@ class FixupCausalResBlock(nn.Module):
                 mean=0,
                 std=np.sqrt(2 / (weight.shape[0] * np.prod(weight.shape[2:]))) * num_layers ** (-0.5)
             )
-            # torch.nn.init.kaiming_normal_(weight).mul_(num_layers ** (-1 / (2*m - m)))
 
         # branch_conv2
         for weight in weight_getter(self.branch_conv2):
@@ -204,29 +205,30 @@ class FixupCausalResBlock(nn.Module):
                 torch.nn.init.constant_(tensor=bias, val=0)
 
 
-class PreActivationFixupCausalResBlock(nn.Module):
+class PreActFixupCausalResBlock(nn.Module):
     def __init__(
         self,
         in_channels: int,
         out_channels: int,
         kernel_size: int,
         mask: str = 'B',  # options are ('A', 'B')
-        condition_dim: int = 0,
-        activation: Callable = nn.SiLU,
-        use_dropout: bool = True,
+        condition_dim: int = 0, #
+        condition_kernel_size: int = 3, # ignored if condition_dim == 0
+        activation: Type[nn.Module] = nn.SiLU,
         dropout_prob: float = 0.5,
-        out: bool = False, # Doesn't do anything
+        bottleneck_divisor: int = 4, # set to 1 to disable bottlenecking
+        #Catch spurious (keyword-)arguments
+        *args,
+        **kwargs
     ):
-        super(PreActivationFixupCausalResBlock, self).__init__()
-
-        self.out = out
+        super().__init__()
 
         self.bias1a, self.bias1b, self.bias2a, self.bias2b, self.bias3a, self.bias3b, self.bias4 = (
             nn.Parameter(torch.zeros(1)) for _ in range(7)
         )
         self.scale = nn.Parameter(torch.ones(1))
 
-        branch_channels = max(in_channels, out_channels)
+        branch_channels = max(in_channels, out_channels) // bottleneck_divisor
         self.branch_conv1 = CausalConv3dAdd(
             in_channels=in_channels, out_channels=branch_channels, kernel_size=1, mask=mask, bias=False
         )
@@ -247,26 +249,29 @@ class PreActivationFixupCausalResBlock(nn.Module):
             in_channels=in_channels, out_channels=out_channels, kernel_size=1, mask=mask, bias=True
         ) if (in_channels != out_channels or mask == 'A') else None
 
-        if condition_dim > 0:
-            condition_kernel_size = 3
-            self.condition = nn.Conv3d(
-                in_channels=condition_dim,
-                out_channels=branch_channels,
-                kernel_size=condition_kernel_size,
-                padding=condition_kernel_size // 2
-            )
+        self.condition = nn.Conv3d(
+            in_channels=condition_dim,
+            out_channels=branch_channels,
+            kernel_size=condition_kernel_size,
+            padding=condition_kernel_size // 2
+        ) if condition_dim > 0 else None
 
         self.activation = activation()
 
-        self.dropout = nn.Dropout3d(dropout_prob) if use_dropout else None
+        self.dropout = nn.Dropout3d(dropout_prob) if dropout_prob > 0 else None
 
-    def forward(self, stack, *, condition=None):
+    def forward(self, stack: torch.Tensor, *, condition: torch.Tensor = None, cache = None):
         out = self.activation(stack + self.bias1a)
         out = self.branch_conv1(out + self.bias1b)
 
         if condition is not None:
             assert self.condition is not None, 'Condition projection matrix not initialised!'
-            out = out + self.condition(condition)
+            condition_size = out.shape[-3:] # volumetric size of stack
+
+            if condition_size not in cache:
+                cache[condition_size] = F.interpolate(condition, size=condition_size, mode='trilinear')
+
+            out = out + self.condition(cache[condition_size])
 
         out = self.activation(out + self.bias2a)
         out = self.branch_conv2(out + self.bias2b)
@@ -285,7 +290,6 @@ class PreActivationFixupCausalResBlock(nn.Module):
 
     @torch.no_grad()
     def initialize_weights(self, num_layers):
-        m = 2 # number of convs in a branch
 
         weight_getter = attrgetter('depth_conv.weight', 'height_conv.weight', 'width_conv.weight')
 
@@ -296,9 +300,8 @@ class PreActivationFixupCausalResBlock(nn.Module):
                 mean=0,
                 std=np.sqrt(2 / (weight.shape[0] * np.prod(weight.shape[2:]))) * num_layers ** (-0.5)
             )
-            # torch.nn.init.kaiming_normal_(weight).mul_(num_layers ** (-1 / (2*m - m)))
 
-        # branch_conv2
+        # branch_conv2 & branch_conv3
         for weight in map(weight_getter, (self.branch_conv2, self.branch_conv3)):
             torch.nn.init.constant_(weight, val=0)
 

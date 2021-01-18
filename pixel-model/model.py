@@ -1,6 +1,6 @@
 import math
 from argparse import ArgumentParser, Namespace
-from typing import Union, Callable
+from typing import Union, Callable, Optional, Type, Dict, Tuple
 from operator import add, mul, attrgetter
 
 import numpy as np
@@ -11,13 +11,17 @@ from torch.nn import functional as F
 from einops import rearrange, repeat
 from pytorch_lightning.metrics import Accuracy, Precision, Recall
 
-from layers import FixupCausalResBlock, PreActivationFixupCausalResBlock, CausalConv3dAdd
+from layers import FixupCausalResBlock, PreActFixupCausalResBlock, input_to_stack, stack_to_output
 from utils.logging_helpers import sub_metric_log_dict
 
 
 def bits_per_dim(mean_nll: torch.Tensor):
     '''Assumes the nll was calculated with the natural logarithm'''
     return mean_nll / np.log(2)
+
+def idx_to_one_hot(data: torch.LongTensor, num_classes: int) -> torch.FloatTensor:
+    return rearrange(F.one_hot(data, num_classes=num_classes),
+                     'b d h w c -> b c d h w').to(torch.float)
 
 
 class PixelSNAIL(pl.LightningModule):
@@ -42,8 +46,9 @@ class PixelSNAIL(pl.LightningModule):
             out_channels=self.model_dim,
             kernel_size=self.kernel_size,
             mask='A',
-            use_dropout=self.use_dropout,
-            dropout_prob=self.dropout_prob
+            dropout_prob=self.dropout_prob,
+            condition_dim=self.condition_dim,
+            bottleneck_divisor=self.bottleneck_divisor,
         )
 
         self.layers = nn.ModuleList([
@@ -52,8 +57,9 @@ class PixelSNAIL(pl.LightningModule):
                 out_channels=self.model_dim,
                 kernel_size=self.kernel_size,
                 mask='B',
-                use_dropout=self.use_dropout,
-                dropout_prob=self.dropout_prob
+                dropout_prob=self.dropout_prob,
+                condition_dim=self.condition_dim,
+                bottleneck_divisor=self.bottleneck_divisor,
             )
             for _ in range(self.num_resblocks)
         ])
@@ -63,13 +69,19 @@ class PixelSNAIL(pl.LightningModule):
             out_channels=self.input_dim,
             kernel_size=self.kernel_size,
             mask='B',
-            use_dropout=self.use_dropout,
             dropout_prob=self.dropout_prob,
+            condition_dim=self.condition_dim,
+            bottleneck_divisor=self.bottleneck_divisor,
+
             out=True,
         )
 
         num_layers = self.num_resblocks + 2 # plus input/output resblocks
-        self.apply(lambda layer: layer.initialize_weights(num_layers=num_layers) if isinstance(layer, FixupCausalResBlock) else None)
+        self.apply(
+            lambda layer: layer.initialize_weights(num_layers=num_layers)
+                          if isinstance(layer, FixupCausalResBlock)
+                          else None
+        )
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, amsgrad=True)
@@ -94,7 +106,7 @@ class PixelSNAIL(pl.LightningModule):
 
     def cross_entropy(self, batch, batch_idx, metrics: dict):
 
-        if len(batch) == 1: # no condition present
+        if len(batch) == 1 or not self.use_conditioning: # no condition present
             data = batch[0]
             condition = None
         else:
@@ -119,16 +131,19 @@ class PixelSNAIL(pl.LightningModule):
 
         self.input_dim, self.condition_dim = args.num_embeddings
 
+        if not args.use_conditioning:
+            self.condition_dim = 0
+
         # TODO: replace with attrsetter
         self.model_dim = args.model_dim
         self.kernel_size = args.kernel_size
         self.num_resblocks = args.num_resblocks
-        self.use_dropout = args.use_dropout
         self.dropout_prob = args.dropout_prob
         self.use_conditioning = args.use_conditioning
+        self.bottleneck_divisor = args.bottleneck_divisor
 
         self.causal_conv = (
-            PreActivationFixupCausalResBlock
+            PreActFixupCausalResBlock
             if args.use_pre_activation
             else FixupCausalResBlock
         )
@@ -144,14 +159,28 @@ class PixelSNAIL(pl.LightningModule):
     def add_model_specific_args(cls, parent_parser):
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
 
+        def booltype(inp: str) -> bool:
+            if type(inp) is str:
+                if inp.lower() == 'true':
+                    return True
+                elif inp.lower() == 'false':
+                    return False
+
+            raise ValueError(f"input should be either 'True', or 'False', found {inp}")
+
         # Model specific arguments
         parser.add_argument('--model-dim', default=32, type=int)
         parser.add_argument('--kernel-size', default=3, type=int)
-        parser.add_argument('--num-resblocks', default=5, type=int)
-        parser.add_argument('--use-dropout', default=True, type=bool)
-        parser.add_argument('--dropout-prob', default=0.5, type=float)
-        parser.add_argument('--use-pre-activation', default=False, type=bool)
-        parser.add_argument('--use-conditioning', default=False, type=bool)
+        parser.add_argument('--num-resblocks', default=18, type=int)
+        parser.add_argument('--dropout-prob', default=0.5, type=float,
+                            help="Set to 0 to disable dropout.")
+        parser.add_argument('--use-pre-activation', default=False, type=booltype)
+        parser.add_argument('--bottleneck-divisor', default=4, type=int,
+                            help=("Ignored if `--use-pre-activation False` is passed. "
+                                  "Set to 1 to disable bottlenecking"))
+        parser.add_argument('--use-conditioning', default=False, type=booltype)
+        parser.add_argument('--mixup-alpha', default=1, type=float,
+                             help="Set to 1 to disable mixup")
 
         # Loss calculation specific
         parser.add_argument('--metric', choices=['cross_entropy'])
@@ -160,21 +189,20 @@ class PixelSNAIL(pl.LightningModule):
         parser.add_argument('--lr', default=1e-5, type=float)
         return parser
 
-    def forward(self, data, condition=None, cache=None):
-        stack = CausalConv3dAdd.input_to_stack(
-            rearrange(F.one_hot(data, num_classes=self.input_dim),
-                      'b d h w c -> b c d h w').to(torch.float)
-        )
+    def forward(self, data: torch.LongTensor, condition: torch.LongTensor = None): # type: ignore
+        # will get modified in place in all layers if condition is not None
+        cache: Dict[torch.Size, torch.Tensor] = {}
+
+        stack = input_to_stack(idx_to_one_hot(data, num_classes=self.input_dim))
 
         if condition is not None:
-            condition = rearrange(
-                F.one_hot(data, num_classes=self.input_dim),
-                'b d h w c -> b c d h w'
-            ).to(torch.float)
+            condition = idx_to_one_hot(condition, num_classes=self.condition_dim) # type: ignore
 
-        stack = self.parse_input(stack, condition=condition)
+        stack = self.parse_input(stack, condition=condition, cache=cache)
 
         for layer in self.layers:
-            stack = layer(stack, condition=condition)
+            stack = layer(stack, condition=condition, cache=cache)
 
-        return CausalConv3dAdd.stack_to_output(self.parse_output(stack))
+        stack = self.parse_output(stack, condition=condition, cache=cache)
+
+        return stack_to_output(stack)
