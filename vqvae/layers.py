@@ -218,6 +218,8 @@ class FixupResBlock(torch.nn.Module):
 
 
     def forward(self, input):
+        # if torch.isnan(torch.Tensor([op(input) for op in (torch.min, torch.mean, torch.median, torch.max, torch.std)])).any():
+        #     breakpoint()
         out = self.branch_conv1(input + self.bias1a)
         out = self.activation(out + self.bias1b)
 
@@ -228,6 +230,9 @@ class FixupResBlock(torch.nn.Module):
 
         if self.mode != 'out':
             out = self.activation(out)
+
+        # if torch.isnan(torch.Tensor([op(tensor) for tensor in (input, out) for op in (torch.min, torch.mean, torch.median, torch.max, torch.std)])).any():
+        #     breakpoint()
 
         return out
 
@@ -323,6 +328,7 @@ class Quantizer(torch.nn.Module):
         self.first_pass.mul_(0)
 
     def forward(self, inputs):
+
         with torch.no_grad():
             channel_last = inputs.permute(0, 2, 3, 4, 1) # XXX: might not actually be necessary
             input_shape = channel_last.shape
@@ -332,7 +338,11 @@ class Quantizer(torch.nn.Module):
             if self.training and self.first_pass:
                 self._init_ema(flat_input)
 
-            encoding_indices = torch.argmin(torch.cdist(flat_input, self.embed), dim=1)
+            # although faster, mm is too inaccurate:
+            # https://github.com/pytorch/pytorch/issues/42479
+            encoding_indices = torch.argmin(
+                torch.cdist(flat_input, self.embed, compute_mode='donot_use_mm_for_euclid_dist')
+            , dim=1)
             quantized = self.embed_code(encoding_indices).reshape(input_shape)
 
             if self.training:

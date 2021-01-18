@@ -34,8 +34,6 @@ def parse_arguments():
         flush_logs_every_n_steps=100,
         weights_summary='full',
 
-        move_metrics_to_cpu=True,
-
         # plugins='ddp_sharded',
     )
 
