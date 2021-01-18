@@ -218,8 +218,7 @@ class FixupResBlock(torch.nn.Module):
 
 
     def forward(self, input):
-        # if torch.isnan(torch.Tensor([op(input) for op in (torch.min, torch.mean, torch.median, torch.max, torch.std)])).any():
-        #     breakpoint()
+
         out = self.branch_conv1(input + self.bias1a)
         out = self.activation(out + self.bias1b)
 
@@ -230,9 +229,6 @@ class FixupResBlock(torch.nn.Module):
 
         if self.mode != 'out':
             out = self.activation(out)
-
-        # if torch.isnan(torch.Tensor([op(tensor) for tensor in (input, out) for op in (torch.min, torch.mean, torch.median, torch.max, torch.std)])).any():
-        #     breakpoint()
 
         return out
 
