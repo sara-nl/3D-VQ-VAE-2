@@ -1,7 +1,3 @@
-"""
-This is largely a refactor of https://github.com/danieltudosiu/nmpevqvae
-"""
-
 from functools import partial
 from typing import Tuple
 from argparse import ArgumentParser, Namespace
@@ -12,11 +8,13 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributions.normal import Normal
 
-from layers import Encoder, Decoder, FixupResBlock
+from layers import Encoder, Decoder, FixupResBlock, PreActFixupResBlock, EvonormResBlock, Encoder2
 from utils import ExtractCenterCylinder
 from metrics.distribution import Logistic, mixture_nll_loss, generic_nll_loss
 from metrics.evaluate import nmse, psnr, SSIM3DSlices
 from utils import sub_metric_log_dict
+from utils.argparse_helpers import booltype
+
 
 
 @torch.no_grad()
@@ -44,18 +42,26 @@ class VQVAE(pl.LightningModule):
         self.save_hyperparameters()
         self._parse_input_args(args)
 
-        self.encoder = Encoder(
+        self.encoder = Encoder2(
             in_channels=self.input_channels,
             base_network_channels=self.base_network_channels,
             n_enc=self.n_bottleneck_blocks,
             n_down_per_enc=self.n_blocks_per_bottleneck,
-            num_embeddings=self.num_embeddings
+            n_pre_q_blocks=self.n_pre_quantization_blocks,
+            n_post_downscale_blocks=self.n_post_downscale_blocks,
+            n_post_upscale_blocks=self.n_post_upscale_blocks,
+            num_embeddings=self.num_embeddings,
+            resblock=self.resblock,
+
         )
         self.decoder = Decoder(
             out_channels=self.output_channels,
             base_network_channels=self.base_network_channels,
             n_enc=self.n_bottleneck_blocks,
             n_up_per_enc=self.n_blocks_per_bottleneck,
+            n_post_q_blocks=self.n_post_quantization_blocks,
+            n_post_upscale_blocks=self.n_post_upscale_blocks,
+            resblock=self.resblock,
         )
 
         self.train_pre_loss_f_metrics = nn.ModuleDict({
@@ -65,7 +71,10 @@ class VQVAE(pl.LightningModule):
             'ssim': SSIM3DSlices(),
         })
 
-        self.apply(lambda layer: layer.initialize_weights(num_layers=self.num_layers) if isinstance(layer, FixupResBlock) else None)
+        def init_fixupresblock(layer):
+            if isinstance(layer, FixupResBlock) or isinstance(layer, PreActFixupResBlock):
+                layer.initialize_weights(num_layers=self.num_layers)
+        self.apply(init_fixupresblock)
 
     def forward(self, data):
         commitment_loss, quantizations, encoding_idx = zip(*self.encode(data))
@@ -107,21 +116,22 @@ class VQVAE(pl.LightningModule):
         x, num_valid_slices = batch
 
         loc, (commitment_loss, *_) = self(x)
-        loc = F.softplus(loc)
+        # loc = F.softplus(loc)
+        loc = F.elu(loc)
 
         masks = torch.zeros_like(x, dtype=torch.bool, requires_grad=False)
         for idx, mask in zip(num_valid_slices, masks):
             mask[..., idx:] += True
 
         # Set padded values to 0
-        torch.masked_fill(loc, mask=masks, value=0)
+        loc = torch.masked_fill(loc, mask=masks, value=0)
 
         log_dict = {}
 
         # Pre loss metrics need full 3d
         log_dict.update({
             k: v for d in
-            (sub_metric_log_dict(metric_name, metric(loc, x)) for metric_name, metric in pre_loss_f_metrics.items())
+            (sub_metric_log_dict(metric_name, metric(loc.half(), x.half())) for metric_name, metric in pre_loss_f_metrics.items())
             for k, v in d.items()
         })
 
@@ -138,7 +148,14 @@ class VQVAE(pl.LightningModule):
         ):
             log_dict.update(log_metric)
 
-        loss = unreduced_recon_loss.mean() + sum(commitment_loss)
+
+        recon_loss = unreduced_recon_loss.mean()
+        commitment_loss = sum(commitment_loss)
+
+        loss = recon_loss + commitment_loss
+
+        self.log('recon loss', recon_loss, prog_bar=True, logger=False)
+        self.log('commitment loss', commitment_loss, prog_bar=True, logger=False)
 
         return loss, log_dict
 
@@ -158,7 +175,11 @@ class VQVAE(pl.LightningModule):
         self.output_channels = args.input_channels
         self.base_network_channels = args.base_network_channels
         self.n_bottleneck_blocks = args.n_bottleneck_blocks
-        self.n_blocks_per_bottleneck = args.n_blocks_per_bottleneck
+        self.n_blocks_per_bottleneck = args.n_downscales_per_bottleneck
+        self.n_pre_quantization_blocks = args.n_pre_quantization_blocks
+        self.n_post_quantization_blocks = args.n_post_quantization_blocks
+        self.n_post_upscale_blocks = args.n_post_upscale_blocks
+        self.n_post_downscale_blocks = args.n_post_downscale_blocks
 
         assert len(args.num_embeddings) in (1, args.n_bottleneck_blocks)
         if len(args.num_embeddings) == 1:
@@ -166,30 +187,53 @@ class VQVAE(pl.LightningModule):
         else:
             self.num_embeddings = args.num_embeddings
 
+        resblocks = {'regular': FixupResBlock, 'pre-activation': PreActFixupResBlock, 'evonorm': EvonormResBlock}
+        self.resblock = resblocks[args.block_type]
+
+        # num_layers is defined as the longest path through the model
+        n_down = args.n_bottleneck_blocks * args.n_downscales_per_bottleneck
         self.num_layers = (
-            (3 * args.n_bottleneck_blocks - 1)
-            * args.n_blocks_per_bottleneck
-            + (2 * args.n_bottleneck_blocks)
+            2 # input + output layer
+            + 2 * n_down # down and up
+            + args.n_pre_quantization_blocks
+            + args.n_post_quantization_blocks
+            + args.n_post_downscale_blocks * n_down
+            + args.n_post_upscale_blocks * n_down
+            + 1 # pre-activation block
         )
+
+        #     (3 * args.n_bottleneck_blocks - 1)
+        #     * args.n_blocks_per_bottleneck
+        #     + (2 * args.n_bottleneck_blocks)
+        # )
 
         self.pre_loss_f = ExtractCenterCylinder() if args.extract_center_cylinder else None
 
 
     @classmethod
     def add_model_specific_args(cls, parent_parser):
+
+
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
 
         # Model specific arguments
         parser.add_argument('--input-channels', type=int, default=1)
         parser.add_argument('--base-network_channels', type=int, default=4)
         parser.add_argument('--n-bottleneck-blocks', type=int, default=3)
-        parser.add_argument('--n-blocks-per-bottleneck', type=int, default=2)
+        parser.add_argument('--n-downscales-per-bottleneck', type=int, default=2)
+        parser.add_argument('--n-pre-quantization-blocks', type=int, default=0)
+        parser.add_argument('--n-post-quantization-blocks', type=int, default=0)
+        parser.add_argument('--n-post-upscale-blocks', type=int, default=0)
+        parser.add_argument('--n-post-downscale-blocks', type=int, default=0)
         parser.add_argument('--num-embeddings', type=int, default=256, nargs='+',
                             help=("Can be either a single int or multiple."
                                   " If multiple, number of args should be equal to n-bottleneck-blocks"))
+        parser.add_argument('--block-type', type=str, default='pre-activation', choices=['regular', 'pre-activation', 'evonorm'])
+        # parser.add_argument('--bottleneck-divisor', type=int, default=4,
+                            # help='ignored if --block-type regular is used')
 
         # loss calculation specific
-        parser.add_argument('--extract-center-cylinder', type=bool, default=True)
+        parser.add_argument('--extract-center-cylinder', type=booltype, default=True)
         parser.add_argument('--metric', choices=cls.supported_metrics, default=cls.supported_metrics[0])
 
         # Optimizer specific arguments

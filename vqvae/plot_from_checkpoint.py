@@ -45,7 +45,7 @@ def main(args: Namespace):
     print("- Performing forward pass")
     with torch.no_grad(), torch.cuda.amp.autocast():
         res, *_ = model(single_sample)
-        res = torch.nn.functional.softplus(res)
+        res = torch.nn.functional.elu(res)
     # res = inverse_softplus(res)
 
     res = res.squeeze().detach().cpu().numpy()

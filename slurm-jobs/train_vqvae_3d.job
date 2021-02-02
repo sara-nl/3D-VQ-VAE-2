@@ -1,9 +1,13 @@
 #!/bin/bash
 
+#SBATCH --job-name vqvae-preact-embed-128-256-512-pre50-post50-catproj-postup3-circularpad-sharded
 #SBATCH -N 6
-#SBATCH --tasks-per-node 4
 #SBATCH -t 5-00:00:00
+#SBATCH --tasks-per-node 4
 #SBATCH -p gpu_titanrtx
+#SBATCH -o slurm-%j-%x.out
+#SBATCh -e slurm-%j-%x.out
+
 export OMP_NUM_THREADS=6
 
 # Flags made to be edited
@@ -11,7 +15,7 @@ DATASET_NAME="14"
 DATASET_EXT=".tar" # must be .tar
 DATASET_ROOT="/project/robertsc/"
 CONDA_ENV="pytorch1.7"
-METRIC="huber" # options ("mse", "rmse", "mae", "huber", "normal_nll", "logistic_mixture_nll")
+METRIC="huber" # options ("huber",)
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 if [[ $SCRIPT_DIR == *"/var/spool/"* ]] && [ ! -z $SLURM_JOB_ID ]; then
@@ -41,6 +45,7 @@ module load mpicopy/4.2-gompi-2020a
 module load NCCL/2.7.8-gcccuda-2020a
 module load cuDNN/8.0.3.33-gcccuda-2020a
 export NCCL_DEBUG=INFO
+export NCCL_ASYNC_ERROR_HANDLING=1
 export PYTHONFAULTHANDLER=1
 
 echo "- activating conda env $CONDA_ENV"
@@ -71,9 +76,15 @@ $DATASET_INDIR \
 --batch-size 1 \
 --input-channels 1 \
 --metric $METRIC \
---base_lr "$NUM_NODES"e-5 \
---num-embeddings 512 \
+--base_lr "$NUM_NODES"e-4 \
+--num-embeddings 128 256 512 \
 --num_nodes $NUM_NODES \
+--block-type pre-activation \
+--n-pre-quantization-blocks 50 \
+--n-post-quantization-blocks 50 \
+--n-post-upscale-blocks 3 \
+--n-post-downscale-blocks 2 \
+--plugins ddp_sharded \
 "
 echo "- found args $PYTHON_ARGS"
 
