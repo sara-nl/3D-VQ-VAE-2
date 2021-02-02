@@ -11,7 +11,7 @@ export OMP_NUM_THREADS=6
 
 # Flags made to be edited
 HIERARCHY_LEVEL="0" # Should be a non-negative integer
-DATASET_NAME="version_7145273_last.lmdb"
+DATASET_NAME="version_7393199_last.lmdb"
 CONDA_ENV="pytorch1.7"
 METRIC="cross_entropy"
 
@@ -74,12 +74,12 @@ echo "- setting args"
 PYTHON_ARGS="\
 $DATASET_INDIR \
 $HIERARCHY_LEVEL \
---batch-size 2 \
+--batch-size 1 \
 --metric $METRIC \
 --lr "$(( $NUM_NODES * 5 ))"e-5 \
 --num_nodes $NUM_NODES \
---num-resblocks 50 \
---model-dim 256 \
+--num-resblocks 40 \
+--model-dim 4 \
 --dropout-prob 0.5 \
 --use-conditioning True \
 --use-pre-activation True \

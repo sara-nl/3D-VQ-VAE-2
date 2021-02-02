@@ -253,7 +253,8 @@ class PreActFixupCausalResBlock(nn.Module):
             in_channels=condition_dim,
             out_channels=branch_channels,
             kernel_size=condition_kernel_size,
-            padding=condition_kernel_size // 2
+            padding=condition_kernel_size // 2,
+            bias=False
         ) if condition_dim > 0 else None
 
         self.activation = activation()

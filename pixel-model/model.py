@@ -13,6 +13,7 @@ from pytorch_lightning.metrics import Accuracy, Precision, Recall
 
 from layers import FixupCausalResBlock, PreActFixupCausalResBlock, input_to_stack, stack_to_output
 from utils.logging_helpers import sub_metric_log_dict
+from utils.argparse_helpers import booltype
 
 
 def bits_per_dim(mean_nll: torch.Tensor):
@@ -158,15 +159,6 @@ class PixelSNAIL(pl.LightningModule):
     @classmethod
     def add_model_specific_args(cls, parent_parser):
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
-
-        def booltype(inp: str) -> bool:
-            if type(inp) is str:
-                if inp.lower() == 'true':
-                    return True
-                elif inp.lower() == 'false':
-                    return False
-
-            raise ValueError(f"input should be either 'True', or 'False', found {inp}")
 
         # Model specific arguments
         parser.add_argument('--model-dim', default=32, type=int)
