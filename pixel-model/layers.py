@@ -214,7 +214,7 @@ class PreActFixupCausalResBlock(nn.Module):
         mask: str = 'B',  # options are ('A', 'B')
         condition_dim: int = 0, #
         condition_kernel_size: int = 3, # ignored if condition_dim == 0
-        activation: Type[nn.Module] = nn.SiLU,
+        activation: Type[nn.Module] = nn.ELU,
         dropout_prob: float = 0.5,
         bottleneck_divisor: int = 4, # set to 1 to disable bottlenecking
         #Catch spurious (keyword-)arguments
@@ -249,13 +249,13 @@ class PreActFixupCausalResBlock(nn.Module):
             in_channels=in_channels, out_channels=out_channels, kernel_size=1, mask=mask, bias=True
         ) if (in_channels != out_channels or mask == 'A') else None
 
-        self.condition = nn.Conv3d(
-            in_channels=condition_dim,
-            out_channels=branch_channels,
-            kernel_size=condition_kernel_size,
-            padding=condition_kernel_size // 2,
-            bias=False
-        ) if condition_dim > 0 else None
+        # self.condition = nn.Conv3d(
+        #     in_channels=condition_dim,
+        #     out_channels=branch_channels,
+        #     kernel_size=condition_kernel_size,
+        #     padding=condition_kernel_size // 2,
+        #     bias=False
+        # ) if condition_dim > 0 else None
 
         self.activation = activation()
 
@@ -265,14 +265,14 @@ class PreActFixupCausalResBlock(nn.Module):
         out = self.activation(stack + self.bias1a)
         out = self.branch_conv1(out + self.bias1b)
 
-        if condition is not None:
-            assert self.condition is not None, 'Condition projection matrix not initialised!'
-            condition_size = out.shape[-3:] # volumetric size of stack
+        # if condition is not None:
+        #     assert self.condition is not None, 'Condition projection matrix not initialised!'
+        #     condition_size = out.shape[-3:] # volumetric size of stack
 
-            if condition_size not in cache:
-                cache[condition_size] = F.interpolate(condition, size=condition_size, mode='trilinear')
+        #     if condition_size not in cache:
+        #         cache[condition_size] = F.interpolate(condition, size=condition_size, mode='trilinear')
 
-            out = out + self.condition(cache[condition_size])
+        #     out = out + self.condition(cache[condition_size])
 
         out = self.activation(out + self.bias2a)
         out = self.branch_conv2(out + self.bias2b)

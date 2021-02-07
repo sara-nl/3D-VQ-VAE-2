@@ -33,23 +33,24 @@ class PixelSNAIL(pl.LightningModule):
 
         self.train_metrics = nn.ModuleDict({
             'accuracy': Accuracy(),
-            'precision': Precision(num_classes=self.input_dim),
-            'recall': Recall(num_classes=self.input_dim),
         })
         self.val_metrics = nn.ModuleDict({
             'accuracy': Accuracy(),
-            'precision': Precision(num_classes=self.input_dim),
-            'recall': Recall(num_classes=self.input_dim),
         })
 
-        self.parse_input = self.causal_conv(
-            in_channels=self.input_dim,
-            out_channels=self.model_dim,
-            kernel_size=self.kernel_size,
-            mask='A',
-            dropout_prob=self.dropout_prob,
-            condition_dim=self.condition_dim,
-            bottleneck_divisor=self.bottleneck_divisor,
+        self.parse_input = nn.Conv3d(
+                in_channels=self.input_dim + self.condition_dim,
+                out_channels=self.model_dim,
+                kernel_size=1
+        )
+        self.to_causal = self.causal_conv(
+                in_channels=self.model_dim,
+                out_channels=self.model_dim,
+                kernel_size=self.kernel_size,
+                mask='A',
+                dropout_prob=self.dropout_prob,
+                condition_dim=self.condition_dim,
+                bottleneck_divisor=self.bottleneck_divisor,
         )
 
         self.layers = nn.ModuleList([
@@ -65,16 +66,10 @@ class PixelSNAIL(pl.LightningModule):
             for _ in range(self.num_resblocks)
         ])
 
-        self.parse_output = self.causal_conv(
+        self.parse_output = nn.Conv3d(
             in_channels=self.model_dim,
             out_channels=self.input_dim,
-            kernel_size=self.kernel_size,
-            mask='B',
-            dropout_prob=self.dropout_prob,
-            condition_dim=self.condition_dim,
-            bottleneck_divisor=self.bottleneck_divisor,
-
-            out=True,
+            kernel_size=1,
         )
 
         num_layers = self.num_resblocks + 2 # plus input/output resblocks
@@ -120,10 +115,12 @@ class PixelSNAIL(pl.LightningModule):
         unreduced_loss = F.cross_entropy(input=logits, target=data, reduction='none')
         loss = unreduced_loss.mean()
 
+        with torch.no_grad():
+            probs = F.softmax(logits, dim=1)
         log_dict = {
             **sub_metric_log_dict('loss', unreduced_loss),
             'bits_per_dim': bits_per_dim(loss),
-            **{metric_name: metric(logits, data) for metric_name, metric in metrics.items()}
+            **{metric_name: metric(probs, data) for metric_name, metric in metrics.items()}
         }
 
         return loss, log_dict
@@ -183,18 +180,20 @@ class PixelSNAIL(pl.LightningModule):
 
     def forward(self, data: torch.LongTensor, condition: torch.LongTensor = None): # type: ignore
         # will get modified in place in all layers if condition is not None
-        cache: Dict[torch.Size, torch.Tensor] = {}
-
-        stack = input_to_stack(idx_to_one_hot(data, num_classes=self.input_dim))
+        # cache: Dict[torch.Size, torch.Tensor] = {}
+        data = idx_to_one_hot(data, num_classes=self.input_dim)
 
         if condition is not None:
-            condition = idx_to_one_hot(condition, num_classes=self.condition_dim) # type: ignore
+            b, c, *size = data.size()
+            data = torch.cat([
+                data,
+                F.interpolate(idx_to_one_hot(condition, num_classes=self.condition_dim),
+                              size=size, mode='trilinear')
+            ], dim=1)
 
-        stack = self.parse_input(stack, condition=condition, cache=cache)
+        stack = self.to_causal(input_to_stack(self.parse_input(data)))
 
         for layer in self.layers:
-            stack = layer(stack, condition=condition, cache=cache)
+            stack = layer(stack)
 
-        stack = self.parse_output(stack, condition=condition, cache=cache)
-
-        return stack_to_output(stack)
+        return self.parse_output(stack_to_output(stack))
