@@ -106,7 +106,8 @@ class PreActFixupResBlock(nn.Module):
     def __init__(self, in_channels, out_channels, mode, activation=nn.ELU, bottleneck_divisor=4):
         super().__init__()
 
-        padding_mode = 'circular'
+        # padding_mode = 'circular'
+        padding_mode = 'replicate' # this only makes sense if the padding size is at most 1
 
         assert mode in ("down", "same", "up", "out")
         self.mode = mode
