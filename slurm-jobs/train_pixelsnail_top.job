@@ -1,21 +1,20 @@
 #!/bin/bash
 
-#SBATCH --job-name vqvae-preact-embed-128-256-512-pre50-post50-catproj-postup3-symmetricpad
+#SBATCH --job-name pixelsnail-top-condition-elu-pre-act-bottleneck-3deep-64wide
 #SBATCH -N 6
-#SBATCH -t 5-00:00:00
 #SBATCH -c 6
 #SBATCH --ntasks-per-node 4
+#SBATCH -t 2-00:00:00
 #SBATCH -p gpu_titanrtx
 #SBATCH -o slurm-%j-%x.out
 #SBATCh -e slurm-%j-%x.out
 export OMP_NUM_THREADS=6
 
 # Flags made to be edited
-DATASET_NAME="14"
-DATASET_EXT=".tar" # must be .tar
-DATASET_ROOT="/project/robertsc/"
+HIERARCHY_LEVEL="0" # Should be a non-negative integer
+DATASET_NAME="version_7393199_last.lmdb"
 CONDA_ENV="pytorch1.7"
-METRIC="huber" # options ("huber",)
+METRIC="cross_entropy"
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 if [[ $SCRIPT_DIR == *"/var/spool/"* ]] && [ ! -z $SLURM_JOB_ID ]; then
@@ -25,6 +24,9 @@ fi
 
 ROOT_DIR=$( cd "$SCRIPT_DIR"/..; pwd )
 echo "- found root dir $ROOT_DIR"
+
+DATASET_ROOT="$ROOT_DIR/vqvae/codes"
+
 
 if [ ! -z $SLURM_JOB_NODELIST ]; then
     NODES=( $( scontrol show hostnames "$SLURM_JOB_NODELIST" | head ) )
@@ -52,7 +54,7 @@ echo "- activating conda env $CONDA_ENV"
 source deactivate
 source activate "$CONDA_ENV"
 
-SCRIPTPATH="$ROOT_DIR/vqvae/train.py"
+SCRIPTPATH="$ROOT_DIR/pixel-model/train.py"
 
 INDIR="$TMPDIR"
 if [ -z $INDIR ]; then
@@ -66,24 +68,24 @@ if [ -z $INDIR ]; then
 fi
 echo "- using INDIR $INDIR"
 
-DATASET_PATH="$DATASET_ROOT""$DATASET_NAME""$DATASET_EXT"
+DATASET_PATH="$DATASET_ROOT"/"$DATASET_NAME"
 DATASET_INDIR="$INDIR"/"$DATASET_NAME"
 echo "- assuming Dataset path $DATASET_PATH"
 
 echo "- setting args"
 PYTHON_ARGS="\
 $DATASET_INDIR \
+$HIERARCHY_LEVEL \
 --batch-size 1 \
---input-channels 1 \
 --metric $METRIC \
---base_lr "$NUM_NODES"e-4 \
---num-embeddings 128 256 512 \
+--lr "$(( $NUM_NODES * 5 ))"e-5 \
 --num_nodes $NUM_NODES \
---block-type pre-activation \
---n-pre-quantization-blocks 50 \
---n-post-quantization-blocks 50 \
---n-post-upscale-blocks 3 \
---n-post-downscale-blocks 2 \
+--num-resblocks 3 \
+--model-dim 64 \
+--dropout-prob 0.5 \
+--use-conditioning True \
+--use-pre-activation True \
+--bottleneck-divisor 4 \
 "
 echo "- found args $PYTHON_ARGS"
 
@@ -91,16 +93,12 @@ if (( $NUM_NODES > 1 )); then
     echo "- multi-node setup"
     echo "- copying dataset"
     mpicopy -v "$DATASET_PATH" -o $INDIR
-    echo "- untarring dataset"
-    srun -n $NUM_NODES --tasks-per-node=1 tar -xkf "$INDIR"/"$DATASET_NAME""$DATASET_EXT" -C "$INDIR"
     echo "- starting run"
     srun python "$SCRIPTPATH" $PYTHON_ARGS
 else
     echo "- single-node setup"
     echo "- copying dataset"
     rsync -ah --info=progress2 "$DATASET_PATH" "$INDIR"
-    echo "- untarring dataset"
-    tar -xkf "$INDIR"/"$DATASET_NAME".tar -C "$INDIR"
     echo "- starting run"
     python "$SCRIPTPATH" $PYTHON_ARGS
 fi

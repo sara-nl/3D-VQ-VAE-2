@@ -1,16 +1,17 @@
 #!/bin/bash
 
-#SBATCH --job-name pixelsnail-mid-no-condition-swish-pre-act-bottleneck
-#SBATCH -N 2
-#SBATCH --tasks-per-node 4
+#SBATCH --job-name pixelsnail-bottom-elu-pre-act-bottleneck-150layers-high-dropout
+#SBATCH -N 1
+#SBATCH -c 6
+#SBATCH --ntasks-per-node 4
 #SBATCH -t 2-00:00:00
-#SBATCH -p gpu_titanrtx
+#SBATCH -p gpu_rtx2080ti
 #SBATCH -o slurm-%j-%x.out
 #SBATCh -e slurm-%j-%x.out
 export OMP_NUM_THREADS=6
 
 # Flags made to be edited
-HIERARCHY_LEVEL="0" # Should be a non-negative integer
+HIERARCHY_LEVEL="2" # Should be a non-negative integer, 0 = top, 1 = mid, 2 = bottom 
 DATASET_NAME="version_7393199_last.lmdb"
 CONDA_ENV="pytorch1.7"
 METRIC="cross_entropy"
@@ -46,6 +47,7 @@ module load mpicopy/4.2-gompi-2020a
 module load NCCL/2.7.8-gcccuda-2020a
 module load cuDNN/8.0.3.33-gcccuda-2020a
 export NCCL_DEBUG=INFO
+export NCCL_ASYNC_ERROR_HANDLING=1
 export PYTHONFAULTHANDLER=1
 
 echo "- activating conda env $CONDA_ENV"
@@ -74,13 +76,13 @@ echo "- setting args"
 PYTHON_ARGS="\
 $DATASET_INDIR \
 $HIERARCHY_LEVEL \
---batch-size 1 \
+--batch-size 6 \
 --metric $METRIC \
---lr "$(( $NUM_NODES * 5 ))"e-5 \
+--lr "$NUM_NODES"e-4 \
 --num_nodes $NUM_NODES \
---num-resblocks 40 \
---model-dim 4 \
---dropout-prob 0.5 \
+--num-resblocks 150 \
+--model-dim 256 \
+--dropout-prob 0.8 \
 --use-conditioning True \
 --use-pre-activation True \
 --bottleneck-divisor 4 \
@@ -98,5 +100,5 @@ else
     echo "- copying dataset"
     rsync -ah --info=progress2 "$DATASET_PATH" "$INDIR"
     echo "- starting run"
-    python "$SCRIPTPATH" $PYTHON_ARGS
+    srun python "$SCRIPTPATH" $PYTHON_ARGS
 fi
