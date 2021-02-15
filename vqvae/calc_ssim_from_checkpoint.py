@@ -20,7 +20,7 @@ def main(args: Namespace):
     pl.trainer.seed_everything(seed=42)
 
     print("- Loading datamodule")
-    datamodule = CTDataModule(path=args.dataset_path, batch_size=1, num_workers=5)
+    datamodule = CTDataModule(path=args.dataset_path, batch_size=1, num_workers=5) # mypy: ignore
     datamodule.setup()
 
     train_dl = datamodule.train_dataloader()
