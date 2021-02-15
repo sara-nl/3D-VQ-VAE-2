@@ -1,20 +1,20 @@
 #!/bin/bash
 
-#SBATCH --job-name pixelsnail-top-condition-elu-pre-act-bottleneck-55deep-16wide
-#SBATCH -N 6
+#SBATCH --job-name sample-embeddings-mid
+#SBATCH -N 1
 #SBATCH -c 6
 #SBATCH --ntasks-per-node 4
-#SBATCH -t 5-00:00:00
-#SBATCH -p gpu_titanrtx
+#SBATCH -t 2-00:00:00
+#SBATCH -p gpu_rtx2080ti_shared
 #SBATCH -o slurm-%j-%x.out
 #SBATCh -e slurm-%j-%x.out
 export OMP_NUM_THREADS=6
 
 # Flags made to be edited
-HIERARCHY_LEVEL="0" # Should be a non-negative integer
-DATASET_NAME="version_7418961_last.lmdb"
+HIERARCHY_LEVEL="1" # Should be a non-negative integer, 0 = top, 1 = mid, 2 = bottom 
+DATASET_NAME="version_7418961_last_condfix"
+MODEL_CHECKPOINT_PATH="slurm-jobs/lightning_logs/version_7440001/checkpoints/epoch=539-step=57239.ckpt" # from root dir
 CONDA_ENV="pytorch1.7"
-METRIC="cross_entropy"
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 if [[ $SCRIPT_DIR == *"/var/spool/"* ]] && [ ! -z $SLURM_JOB_ID ]; then
@@ -25,36 +25,24 @@ fi
 ROOT_DIR=$( cd "$SCRIPT_DIR"/..; pwd )
 echo "- found root dir $ROOT_DIR"
 
-DATASET_ROOT="$ROOT_DIR/vqvae/codes"
-
-
-if [ ! -z $SLURM_JOB_NODELIST ]; then
-    NODES=( $( scontrol show hostnames "$SLURM_JOB_NODELIST" | head ) )
-    NUM_NODES="${#NODES[@]}"
-else
-    NUM_NODES="1"
-fi
-
 echo "- setting up env"
 # Conda env
 module load 2020
 module load Miniconda3
 
-# Multi-node copy util
-module load mpicopy/4.2-gompi-2020a
-
 # Cuda/cuDNN/NCCL
 module load NCCL/2.7.8-gcccuda-2020a
 module load cuDNN/8.0.3.33-gcccuda-2020a
 export NCCL_DEBUG=INFO
-export NCCL_ASYNC_ERROR_HANDLING=1
 export PYTHONFAULTHANDLER=1
 
 echo "- activating conda env $CONDA_ENV"
 source deactivate
 source activate "$CONDA_ENV"
 
-SCRIPTPATH="$ROOT_DIR/pixel-model/train.py"
+SCRIPT_PATH="$ROOT_DIR/pixel-model/sample_embeddings.py"
+IO_PATH="$ROOT_DIR/pixel-model/codes"/$DATASET_NAME'.pt'
+CKPT_PATH="$ROOT_DIR"/"$MODEL_CHECKPOINT_PATH"
 
 INDIR="$TMPDIR"
 if [ -z $INDIR ]; then
@@ -68,38 +56,21 @@ if [ -z $INDIR ]; then
 fi
 echo "- using INDIR $INDIR"
 
-DATASET_PATH="$DATASET_ROOT"/"$DATASET_NAME"
+DATASET_PATH="$DATASET_ROOT""$DATASET_NAME""$DATASET_EXT"
 DATASET_INDIR="$INDIR"/"$DATASET_NAME"
 echo "- assuming Dataset path $DATASET_PATH"
 
 echo "- setting args"
 PYTHON_ARGS="\
-$DATASET_INDIR \
-$HIERARCHY_LEVEL \
---batch-size 1 \
---metric $METRIC \
---lr "$(( $NUM_NODES * 5 ))"e-5 \
---num_nodes $NUM_NODES \
---num-resblocks 55 \
---model-dim 16 \
---dropout-prob 0 \
---use-conditioning True \
---use-pre-activation True \
---bottleneck-divisor 4 \
---use-concat-activation False \
+--model-checkpoint $CKPT_PATH \
+--db-path $IO_PATH \
+--level $HIERARCHY_LEVEL \
+--size 32 32 8 \
+--num-samples 20 \
+--batch-size 20 \
+--tau 1 \
 "
 echo "- found args $PYTHON_ARGS"
 
-if (( $NUM_NODES > 1 )); then
-    echo "- multi-node setup"
-    echo "- copying dataset"
-    mpicopy -v "$DATASET_PATH" -o $INDIR
-    echo "- starting run"
-    srun python "$SCRIPTPATH" $PYTHON_ARGS
-else
-    echo "- single-node setup"
-    echo "- copying dataset"
-    rsync -ah --info=progress2 "$DATASET_PATH" "$INDIR"
-    echo "- starting run"
-    python "$SCRIPTPATH" $PYTHON_ARGS
-fi
+echo "- starting run"
+python "$SCRIPT_PATH" $PYTHON_ARGS

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name vqvae-preact-embed-128-256-512-pre50-post50-catproj-postup3-symmetricpad
+#SBATCH --job-name vqvae-preact-embed-128-256-512-pre50-post50-catproj-postup3-symmetricpad-restart-restart
 #SBATCH -N 6
 #SBATCH -t 5-00:00:00
 #SBATCH -c 6
@@ -84,6 +84,7 @@ $DATASET_INDIR \
 --n-post-quantization-blocks 50 \
 --n-post-upscale-blocks 3 \
 --n-post-downscale-blocks 2 \
+--resume_from_checkpoint $ROOT_DIR/slurm-jobs/lightning_logs/version_7433708/checkpoints/epoch=315-step=33389.ckpt \
 "
 echo "- found args $PYTHON_ARGS"
 

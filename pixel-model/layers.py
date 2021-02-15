@@ -69,21 +69,28 @@ def stack_to_output(stack: torch.Tensor) -> torch.Tensor:
     return shift_backwards_3d(depth) + shift_down_3d(height) + width
 
 
+class ConcatActivation(nn.Module):
+    def __init__(self, activation: nn.Module, dim: int):
+        super().__init__()
+        self.activation = activation()
+        self.dim = dim
+
+    def forward(self, x):
+        return torch.cat([self.activation(x), -self.activation(-x)], dim=self.dim)
+
 
 class CausalConv3dAdd(nn.Module):
     def __init__(
         self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: int,
-        bias: bool = True,
         mask: str = 'B',
+        **conv_kwargs,
     ):
         super().__init__()
-
+        assert 'padding' not in conv_kwargs
         assert mask in ('A', 'B')
         self.mask = mask
 
+        kernel_size = conv_kwargs.pop('kernel_size')
         assert kernel_size > 0
         assert kernel_size % 2 == 1, "even kernel sizes are not supported"
 
@@ -96,9 +103,9 @@ class CausalConv3dAdd(nn.Module):
 
         # Split depth, height, width conv into three, allowing the receptive field to grow without blindspot
         # See https://papers.nips.cc/paper/2016/file/b1301141feffabac455e1f90a7de2054-Paper.pdf figure 1.
-        self.depth_conv = nn.Conv3d(in_channels, out_channels, kernel_size=(depth_size, kernel_size, kernel_size), bias=bias)
-        self.height_conv = nn.Conv3d(in_channels, out_channels, kernel_size=(1, height_size, kernel_size), bias=bias)
-        self.width_conv = nn.Conv3d(in_channels, out_channels, kernel_size=(1, 1, width_size), bias=bias)
+        self.depth_conv = nn.Conv3d(kernel_size=(depth_size, kernel_size, kernel_size), **conv_kwargs)
+        self.height_conv = nn.Conv3d(kernel_size=(1, height_size, kernel_size), **conv_kwargs)
+        self.width_conv = nn.Conv3d(kernel_size=(1, 1, width_size), **conv_kwargs)
 
         # padding is always (*width, *height, *depth), i.e. (left, right, top, bottom, front, back)
         half_kernel = kernel_size // 2
@@ -217,6 +224,7 @@ class PreActFixupCausalResBlock(nn.Module):
         activation: Type[nn.Module] = nn.ELU,
         dropout_prob: float = 0.5,
         bottleneck_divisor: int = 4, # set to 1 to disable bottlenecking
+        concat_activation: bool = False,
         #Catch spurious (keyword-)arguments
         *args,
         **kwargs
@@ -228,19 +236,40 @@ class PreActFixupCausalResBlock(nn.Module):
         )
         self.scale = nn.Parameter(torch.ones(1))
 
-        branch_channels = max(in_channels, out_channels) // bottleneck_divisor
+        groups = 2 if concat_activation else 1
+
+        branch_channels = max(
+            max(in_channels, out_channels) // bottleneck_divisor,
+            groups
+        )
+
         self.branch_conv1 = CausalConv3dAdd(
-            in_channels=in_channels, out_channels=branch_channels, kernel_size=1, mask=mask, bias=False
+            in_channels=in_channels*groups,
+            out_channels=branch_channels,
+            kernel_size=1,
+            mask=mask,
+            bias=False,
+            groups=groups
         )
 
         # second conv in the branch is always ok to be 'B'
         self.branch_conv2 = CausalConv3dAdd(
-            in_channels=branch_channels, out_channels=branch_channels, kernel_size=kernel_size, mask='B', bias=False
+            in_channels=branch_channels*groups,
+            out_channels=branch_channels,
+            kernel_size=kernel_size,
+            mask='B',
+            bias=False,
+            groups=groups
         )
 
         # same for third
         self.branch_conv3 = CausalConv3dAdd(
-            in_channels=branch_channels, out_channels=out_channels, kernel_size=1, mask='B', bias=False
+            in_channels=branch_channels*groups,
+            out_channels=out_channels,
+            kernel_size=1,
+            mask='B',
+            bias=False,
+            groups=groups
         )
 
         # 1x1x1 conv for channel dim projection
@@ -249,30 +278,34 @@ class PreActFixupCausalResBlock(nn.Module):
             in_channels=in_channels, out_channels=out_channels, kernel_size=1, mask=mask, bias=True
         ) if (in_channels != out_channels or mask == 'A') else None
 
-        # self.condition = nn.Conv3d(
-        #     in_channels=condition_dim,
-        #     out_channels=branch_channels,
-        #     kernel_size=condition_kernel_size,
-        #     padding=condition_kernel_size // 2,
-        #     bias=False
-        # ) if condition_dim > 0 else None
+        self.condition = nn.Conv3d(
+            in_channels=condition_dim,
+            out_channels=branch_channels,
+            kernel_size=condition_kernel_size,
+            padding=condition_kernel_size // 2,
+            bias=True
+        ) if condition_dim > 0 else None
 
-        self.activation = activation()
+        self.activation = activation() if not concat_activation else ConcatActivation(activation, dim=2)
 
         self.dropout = nn.Dropout3d(dropout_prob) if dropout_prob > 0 else None
 
-    def forward(self, stack: torch.Tensor, *, condition: torch.Tensor = None, cache = None):
-        out = self.activation(stack + self.bias1a)
+    def forward(self, stack: torch.Tensor, condition: torch.Tensor = None, condition_cache = None):
+        out = stack
+
+        out = self.activation(out + self.bias1a)
         out = self.branch_conv1(out + self.bias1b)
 
-        # if condition is not None:
-        #     assert self.condition is not None, 'Condition projection matrix not initialised!'
-        #     condition_size = out.shape[-3:] # volumetric size of stack
+        if condition is not None or condition_cache is not None:
+            # deliberately prefer condition_cache over computing condition again
+            if condition_cache is not None:
+                condition = condition_cache.popleft()
+            else:
+                assert self.condition is not None, 'Condition projection matrix not initialised!'
+                condition = self.condition(condition)
 
-        #     if condition_size not in cache:
-        #         cache[condition_size] = F.interpolate(condition, size=condition_size, mode='trilinear')
-
-        #     out = out + self.condition(cache[condition_size])
+            dim = out.shape[-3:] # volumetric size of stack
+            out = out + condition[..., :dim[0], :dim[1], :dim[2]]
 
         out = self.activation(out + self.bias2a)
         out = self.branch_conv2(out + self.bias2b)
@@ -287,7 +320,7 @@ class PreActFixupCausalResBlock(nn.Module):
 
         out = out + (stack if self.skip_conv is None else self.skip_conv(stack))
 
-        return out
+        return out, condition, condition_cache
 
     @torch.no_grad()
     def initialize_weights(self, num_layers):
@@ -315,4 +348,3 @@ class PreActFixupCausalResBlock(nn.Module):
             bias_getter = attrgetter('depth_conv.bias', 'height_conv.bias', 'width_conv.bias')
             for bias in bias_getter(self.skip_conv):
                 torch.nn.init.constant_(tensor=bias, val=0)
-

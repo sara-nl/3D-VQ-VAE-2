@@ -1,15 +1,20 @@
 import math
+from functools import partial
+from itertools import product, chain
 from argparse import ArgumentParser, Namespace
-from typing import Union, Callable, Optional, Type, Dict, Tuple
+from typing import Union, Callable, Optional, Type, Dict, Tuple, Any, List, Sequence
 from operator import add, mul, attrgetter
+from collections import deque
 
 import numpy as np
 import pytorch_lightning as pl
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch.distributions.categorical import Categorical
 from einops import rearrange, repeat
 from pytorch_lightning.metrics import Accuracy, Precision, Recall
+from tqdm import tqdm
 
 from layers import FixupCausalResBlock, PreActFixupCausalResBlock, input_to_stack, stack_to_output
 from utils.logging_helpers import sub_metric_log_dict
@@ -39,7 +44,7 @@ class PixelSNAIL(pl.LightningModule):
         })
 
         self.parse_input = nn.Conv3d(
-                in_channels=self.input_dim + self.condition_dim,
+                in_channels=self.input_dim,
                 out_channels=self.model_dim,
                 kernel_size=1
         )
@@ -51,6 +56,7 @@ class PixelSNAIL(pl.LightningModule):
                 dropout_prob=self.dropout_prob,
                 condition_dim=self.condition_dim,
                 bottleneck_divisor=self.bottleneck_divisor,
+                concat_activation=self.use_concat_activation,
         )
 
         self.layers = nn.ModuleList([
@@ -60,8 +66,13 @@ class PixelSNAIL(pl.LightningModule):
                 kernel_size=self.kernel_size,
                 mask='B',
                 dropout_prob=self.dropout_prob,
-                condition_dim=self.condition_dim,
+                condition_dim=(
+                    self.model_dim // self.bottleneck_divisor
+                    if self.condition_dim != 0
+                    else 0
+                ),
                 bottleneck_divisor=self.bottleneck_divisor,
+                concat_activation=self.use_concat_activation,
             )
             for _ in range(self.num_resblocks)
         ])
@@ -108,9 +119,18 @@ class PixelSNAIL(pl.LightningModule):
         else:
             data, condition = batch
             condition = condition.squeeze(dim=1)
-        data = data.squeeze(dim=1)
+            b, c, *dim = data.size()
 
-        logits = self(data, condition=condition)
+            condition = F.interpolate(
+                idx_to_one_hot(condition, num_classes=self.condition_dim),
+                size=dim, mode='trilinear'
+            ).detach()
+        data = data.squeeze(dim=1).detach()
+
+        logits = self(
+            data=idx_to_one_hot(data, num_classes=self.input_dim).detach(),
+            condition=condition
+        )
 
         unreduced_loss = F.cross_entropy(input=logits, target=data, reduction='none')
         loss = unreduced_loss.mean()
@@ -138,6 +158,7 @@ class PixelSNAIL(pl.LightningModule):
         self.num_resblocks = args.num_resblocks
         self.dropout_prob = args.dropout_prob
         self.use_conditioning = args.use_conditioning
+        self.use_concat_activation = args.use_concat_activation
         self.bottleneck_divisor = args.bottleneck_divisor
 
         self.causal_conv = (
@@ -168,6 +189,7 @@ class PixelSNAIL(pl.LightningModule):
                             help=("Ignored if `--use-pre-activation False` is passed. "
                                   "Set to 1 to disable bottlenecking"))
         parser.add_argument('--use-conditioning', default=False, type=booltype)
+        parser.add_argument('--use-concat-activation', default=False, type=booltype)
         parser.add_argument('--mixup-alpha', default=1, type=float,
                              help="Set to 1 to disable mixup")
 
@@ -178,22 +200,72 @@ class PixelSNAIL(pl.LightningModule):
         parser.add_argument('--lr', default=1e-5, type=float)
         return parser
 
-    def forward(self, data: torch.LongTensor, condition: torch.LongTensor = None): # type: ignore
-        # will get modified in place in all layers if condition is not None
-        # cache: Dict[torch.Size, torch.Tensor] = {}
-        data = idx_to_one_hot(data, num_classes=self.input_dim)
+    @torch.no_grad()
+    def sample(
+        self,
+        size: Sequence[int],
+        condition: torch.LongTensor,
+        sampling_f: Callable[[torch.Tensor], Any] = partial(F.gumbel_softmax, tau=1, dim=1)
+    ):
+        '''Warning: if applicable, the user is responsible for calling model.eval()!'''
+        assert len(size) == 4
+        batch, *dims = size
+        size = (batch, self.input_dim, *dims)
+
+        result = torch.zeros(size, dtype=torch.half, device=self.device) # mypy: ignore
 
         if condition is not None:
-            b, c, *size = data.size()
-            data = torch.cat([
-                data,
-                F.interpolate(idx_to_one_hot(condition, num_classes=self.condition_dim),
-                              size=size, mode='trilinear')
-            ], dim=1)
+            condition = F.interpolate(
+                idx_to_one_hot(condition, num_classes=self.condition_dim),
+                size=dims, mode='trilinear'
+            ).to(torch.half)
+            condition_cache = self._generate_condition_cache(condition)
 
-        stack = self.to_causal(input_to_stack(self.parse_input(data)))
+         # iterate over all dimensions
+        max_dim = [0 for _ in dims]
+        for dim in tqdm(product(*tuple(range(dim) for dim in dims)), total=math.prod(dims)):
+            for i, (d, max_d) in enumerate(zip(dim, max_dim)):
+                max_dim[i] = max(d+1, max_d)
 
-        for layer in self.layers:
-            stack = layer(stack)
+            current_slice = (Ellipsis, *(slice(max_d) for max_d in max_dim))
+            current_sample = (Ellipsis, *(d for d in dim))
+
+            out = self.forward(
+                data=result[current_slice],
+                condition_cache=(
+                    condition_cache.copy()
+                    if condition is not None
+                    else None
+                )
+            )
+
+            result[current_sample] = sampling_f(out[current_sample])
+
+        return torch.argmax(result, dim=1)
+
+    def _generate_condition_cache(self, condition) -> deque:
+        # We could also just iterate over self.children(),
+        # but that would be a bit risky considering that then the iteration order
+        # would depend on the initialisation order.
+        # Using the way below, we explicitely control the calling order of layers.
+        return deque([
+            (condition := layer.condition(condition))
+            for layer in chain((self.to_causal,), self.layers)
+        ])
+
+
+    def forward( # mypy: ignore
+        self,
+        data: torch.LongTensor,
+        condition: torch.LongTensor = None,
+        # The args below are purely for performance reasons
+        condition_cache: Union[deque, None] = None
+    ): # type: ignore
+        '''Note: the user is responsible for making sure that condition is an appropriate size'''
+
+        stack = input_to_stack(self.parse_input(data))
+
+        for layer in chain((self.to_causal,), self.layers):
+            stack, condition, condition_cache = layer(stack, condition, condition_cache)
 
         return self.parse_output(stack_to_output(stack))
