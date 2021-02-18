@@ -33,6 +33,8 @@ def parse_arguments():
         val_check_interval=0.5,
         flush_logs_every_n_steps=100,
         weights_summary='full',
+
+        max_epochs=int(1e5),
     )
 
     args = parser.parse_args()

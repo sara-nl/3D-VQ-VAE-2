@@ -53,20 +53,20 @@ def _get_db_lock(db_path) -> FileLock:
 def create_or_load_db(db_path: Path, level: int):
     # saving/loading everything as .pt is pretty dumb,
     # since everything gets dumped immediately into memory.
+    # Next, process-safe read/writes are impossible, except using
+    # explicit locking as I use below.
     # But, doing it this way is also the most easy solution (for me).
     # _surely_ this won't bite anyone in the ass at some point...
     # FIXME: rewrite whole db logic to use some lazy-reading db format
 
-    if not db_path.exists():
-        # Maybe this isn't a race condition?
-        # https://bugs.python.org/issue29694
-        print(f"No db found! creating new db at {db_path}!")
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        db = {}
-    else:
-        db_lock = _get_db_lock(db_path)
-        with db_lock:
-            db = torch.load(db_path, map_location='cpu')
+    db_lock = _get_db_lock(db_path)
+    with db_lock:
+        if not db_path.exists():
+            print(f"No db found! creating new db at {db_path}!")
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save({}, db_path)
+
+        db = torch.load(db_path, map_location='cpu')
 
     if level not in db:
         print(f"Hierarchy {level} not found in db; adding.")
@@ -75,11 +75,13 @@ def create_or_load_db(db_path: Path, level: int):
     return db
 
 
-def save_db(db, db_path):
+def save_db(db, db_path, level):
     db_lock = _get_db_lock(db_path)
     with db_lock:
         # maybe the db got updated independently in a different process
-        db.update(torch.load(db_path, map_location='cpu'))
+        possibly_updated_db = torch.load(db_path, map_location='cpu')
+        if level in possibly_updated_db:
+            db[level].update(possibly_updated_db[level])
 
         torch.save(db, db_path)
 
@@ -133,7 +135,7 @@ def main(model_checkpoint, db_path, level, size, num_samples, batch_size, tau):
             ):
                 db[level][uuid4()] = {'data': data.cpu(), 'condition': cond_uuid}
 
-    torch.save(db, db_path)
+    save_db(db, db_path, level)
 
 
 

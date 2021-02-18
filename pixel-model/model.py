@@ -16,7 +16,7 @@ from einops import rearrange, repeat
 from pytorch_lightning.metrics import Accuracy, Precision, Recall
 from tqdm import tqdm
 
-from layers import FixupCausalResBlock, PreActFixupCausalResBlock, input_to_stack, stack_to_output
+from layers import FixupCausalResBlock, PreActFixupCausalResBlock, input_to_stack, stack_to_output, GatedResBlock
 from utils.logging_helpers import sub_metric_log_dict
 from utils.argparse_helpers import booltype
 
@@ -44,37 +44,43 @@ class PixelSNAIL(pl.LightningModule):
         })
 
         self.parse_input = nn.Conv3d(
-                in_channels=self.input_dim,
-                out_channels=self.model_dim,
-                kernel_size=1
+            in_channels=self.input_dim,
+            out_channels=self.model_dim,
+            kernel_size=1
         )
-        self.to_causal = self.causal_conv(
-                in_channels=self.model_dim,
-                out_channels=self.model_dim,
-                kernel_size=self.kernel_size,
-                mask='A',
-                dropout_prob=self.dropout_prob,
-                condition_dim=self.condition_dim,
-                bottleneck_divisor=self.bottleneck_divisor,
-                concat_activation=self.use_concat_activation,
-        )
+
+        # condition_dim = (
+        #     self.condition_dim
+        #     if self.use_gated_block
+        #     else (
+        #         self.model_dim // self.bottleneck_divisor
+        #         if self.condition_dim != 0
+        #         else 0
+        #     )
+        # )
+
+        condition_dim = self.model_dim
+
+        self.embed_condition = nn.Conv3d(
+            in_channels=self.condition_dim,
+            out_channels=condition_dim,
+            kernel_size=1
+        ) if self.use_conditioning else None
+
 
         self.layers = nn.ModuleList([
             self.causal_conv(
                 in_channels=self.model_dim,
                 out_channels=self.model_dim,
                 kernel_size=self.kernel_size,
-                mask='B',
+                mask='A' if i == 0 else 'B',
                 dropout_prob=self.dropout_prob,
-                condition_dim=(
-                    self.model_dim // self.bottleneck_divisor
-                    if self.condition_dim != 0
-                    else 0
-                ),
+                condition_dim=condition_dim,
+                condition_kernel_size=1,
                 bottleneck_divisor=self.bottleneck_divisor,
                 concat_activation=self.use_concat_activation,
             )
-            for _ in range(self.num_resblocks)
+            for i in range(self.num_resblocks+1)
         ])
 
         self.parse_output = nn.Conv3d(
@@ -83,7 +89,7 @@ class PixelSNAIL(pl.LightningModule):
             kernel_size=1,
         )
 
-        num_layers = self.num_resblocks + 2 # plus input/output resblocks
+        num_layers = self.num_resblocks+1 # plus input/output resblocks
         self.apply(
             lambda layer: layer.initialize_weights(num_layers=num_layers)
                           if isinstance(layer, FixupCausalResBlock)
@@ -146,6 +152,7 @@ class PixelSNAIL(pl.LightningModule):
         return loss, log_dict
 
     def _parse_input_args(self, args: Namespace):
+        args.use_gated_block = False
 
         self.input_dim, self.condition_dim = args.num_embeddings
 
@@ -157,15 +164,18 @@ class PixelSNAIL(pl.LightningModule):
         self.kernel_size = args.kernel_size
         self.num_resblocks = args.num_resblocks
         self.dropout_prob = args.dropout_prob
+        self.use_gated_block = args.use_gated_block
         self.use_conditioning = args.use_conditioning
         self.use_concat_activation = args.use_concat_activation
         self.bottleneck_divisor = args.bottleneck_divisor
 
         self.causal_conv = (
-            PreActFixupCausalResBlock
-            if args.use_pre_activation
-            else FixupCausalResBlock
-        )
+            GatedResBlock
+            if args.use_gated_block
+            else (PreActFixupCausalResBlock
+                  if args.use_pre_activation
+                  else FixupCausalResBlock)
+        )   
 
         if args.metric == 'cross_entropy':
             self.loss_f = self.cross_entropy
@@ -185,6 +195,7 @@ class PixelSNAIL(pl.LightningModule):
         parser.add_argument('--dropout-prob', default=0.5, type=float,
                             help="Set to 0 to disable dropout.")
         parser.add_argument('--use-pre-activation', default=False, type=booltype)
+        parser.add_argument('--use-gated-block', default=False, type=booltype)
         parser.add_argument('--bottleneck-divisor', default=4, type=int,
                             help=("Ignored if `--use-pre-activation False` is passed. "
                                   "Set to 1 to disable bottlenecking"))
@@ -221,14 +232,25 @@ class PixelSNAIL(pl.LightningModule):
             ).to(torch.half)
             condition_cache = self._generate_condition_cache(condition)
 
-         # iterate over all dimensions
+
+        # Full forward pass, to check for memory errors
+        self.forward(
+            data=result,
+            condition_cache=(
+                condition_cache.copy()
+                if condition is not None
+                else None
+            )
+        )
+
+        # iterate over all dimensions
         max_dim = [0 for _ in dims]
         for dim in tqdm(product(*tuple(range(dim) for dim in dims)), total=math.prod(dims)):
             for i, (d, max_d) in enumerate(zip(dim, max_dim)):
                 max_dim[i] = max(d+1, max_d)
 
-            current_slice = (Ellipsis, *(slice(max_d) for max_d in max_dim))
-            current_sample = (Ellipsis, *(d for d in dim))
+            current_slice = (..., *(slice(max_d) for max_d in max_dim))
+            current_sample = (..., *(d for d in dim))
 
             out = self.forward(
                 data=result[current_slice],
@@ -238,9 +260,9 @@ class PixelSNAIL(pl.LightningModule):
                     else None
                 )
             )
-
             result[current_sample] = sampling_f(out[current_sample])
 
+        # FIXME: remove the argmax
         return torch.argmax(result, dim=1)
 
     def _generate_condition_cache(self, condition) -> deque:
@@ -250,7 +272,7 @@ class PixelSNAIL(pl.LightningModule):
         # Using the way below, we explicitely control the calling order of layers.
         return deque([
             (condition := layer.condition(condition))
-            for layer in chain((self.to_causal,), self.layers)
+            for layer in self.layers
         ])
 
 
@@ -265,7 +287,10 @@ class PixelSNAIL(pl.LightningModule):
 
         stack = input_to_stack(self.parse_input(data))
 
-        for layer in chain((self.to_causal,), self.layers):
-            stack, condition, condition_cache = layer(stack, condition, condition_cache)
+        if not (self.embed_condition is None and self.condition_cache is None):
+            condition = self.embed_condition(condition)
+
+        for layer in self.layers:
+            stack, condition_cache = layer(stack, condition, condition_cache)
 
         return self.parse_output(stack_to_output(stack))

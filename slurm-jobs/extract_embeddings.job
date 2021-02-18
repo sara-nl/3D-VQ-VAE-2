@@ -58,7 +58,7 @@ echo "- setting args"
 PYTHON_ARGS="\
 --dataset-path $DATASET_INDIR \
 --output-path $OUTPUT_PATH \
---checkpoint-path $ROOT_DIR/slurm-jobs/lightning_logs/version_7418961/checkpoints/last.ckpt \
+--checkpoint-path $ROOT_DIR/slurm-jobs/lightning_logs/version_7435930/checkpoints/epoch=998-step=105787.ckpt \
 "
 echo "- found args $PYTHON_ARGS"
 

@@ -1,9 +1,8 @@
 #!/bin/bash
 
-#SBATCH --job-name sample-embeddings-bottom
+#SBATCH --job-name sample-embeddings-bottom-hightau
 #SBATCH -N 1
 #SBATCH -c 6
-#SBATCH --ntasks-per-node 4
 #SBATCH -t 2-00:00:00
 #SBATCH -p gpu_titanrtx-shared
 #SBATCH -o slurm-%j-%x.out
@@ -12,7 +11,7 @@ export OMP_NUM_THREADS=6
 
 # Flags made to be edited
 HIERARCHY_LEVEL="2" # Should be a non-negative integer, 0 = top, 1 = mid, 2 = bottom 
-DATASET_NAME="version_7418961_last_condfix"
+DATASET_NAME="version_7418961_last_lowtau"
 MODEL_CHECKPOINT_PATH="slurm-jobs/lightning_logs/version_7439612/checkpoints/epoch=74-step=7896.ckpt" # from root dir
 CONDA_ENV="pytorch1.7"
 
@@ -62,9 +61,9 @@ PYTHON_ARGS="\
 --db-path $IO_PATH \
 --level $HIERARCHY_LEVEL \
 --size 8 8 2 \
---num-samples 10 \
---batch-size 5 \
---tau 1 \
+--num-samples 20 \
+--batch-size 20 \
+--tau 0.1 \
 "
 echo "- found args $PYTHON_ARGS"
 

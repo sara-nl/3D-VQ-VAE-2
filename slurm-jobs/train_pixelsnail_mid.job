@@ -1,7 +1,7 @@
 #!/bin/bash
 
-#SBATCH --job-name pixelsnail-mid-condition-elu-pre-act-bottleneck-50long-512wide
-#SBATCH -N 6
+#SBATCH --job-name pixelsnail-mid-rfgrow-45long-256wide-outputfix-condfix
+#SBATCH -N 3
 #SBATCH -c 6
 #SBATCH --ntasks-per-node 4
 #SBATCH -t 2-00:00:00
@@ -11,7 +11,7 @@
 
 # Flags made to be edited
 HIERARCHY_LEVEL="1" # Should be a non-negative integer, 0 = top, 1 = mid, 2 = bottom 
-DATASET_NAME="version_7418961_last.lmdb"
+DATASET_NAME="version_7435930_epoch_998.lmdb"
 CONDA_ENV="pytorch1.7"
 METRIC="cross_entropy"
 
@@ -75,12 +75,12 @@ echo "- setting args"
 PYTHON_ARGS="\
 $DATASET_INDIR \
 $HIERARCHY_LEVEL \
---batch-size 1 \
+--batch-size 2 \
 --metric $METRIC \
---lr "$(( $NUM_NODES ))"e-5 \
+--lr "$(( $NUM_NODES ))"e-4 \
 --num_nodes $NUM_NODES \
 --num-resblocks 45 \
---model-dim 512 \
+--model-dim 256 \
 --dropout-prob 0.5 \
 --use-conditioning True \
 --use-pre-activation True \

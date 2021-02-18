@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name pixelsnail-top-condition-elu-pre-act-bottleneck-55deep-16wide
+#SBATCH --job-name pixelsnail-top-rfgrow
 #SBATCH -N 6
 #SBATCH -c 6
 #SBATCH --ntasks-per-node 4
@@ -12,7 +12,7 @@ export OMP_NUM_THREADS=6
 
 # Flags made to be edited
 HIERARCHY_LEVEL="0" # Should be a non-negative integer
-DATASET_NAME="version_7418961_last.lmdb"
+DATASET_NAME="version_7435930_epoch_998.lmdb"
 CONDA_ENV="pytorch1.7"
 METRIC="cross_entropy"
 
@@ -80,7 +80,7 @@ $HIERARCHY_LEVEL \
 --metric $METRIC \
 --lr "$(( $NUM_NODES * 5 ))"e-5 \
 --num_nodes $NUM_NODES \
---num-resblocks 55 \
+--num-resblocks 50 \
 --model-dim 16 \
 --dropout-prob 0 \
 --use-conditioning True \

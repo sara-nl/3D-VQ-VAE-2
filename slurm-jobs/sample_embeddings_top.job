@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name sample-embeddings-top
+#SBATCH --job-name sample-embeddings-top-lowtau
 #SBATCH -N 1
 #SBATCH -c 6
 #SBATCH --ntasks-per-node 1
@@ -12,7 +12,7 @@ export OMP_NUM_THREADS=6
 
 # Flags made to be edited
 HIERARCHY_LEVEL="0" # Should be a non-negative integer, 0 = top, 1 = mid, 2 = bottom 
-DATASET_NAME="version_7418961_last_condfix"
+DATASET_NAME="version_7418961_last_lowtau"
 MODEL_CHECKPOINT_PATH="slurm-jobs/lightning_logs/version_7439953/checkpoints/last.ckpt" # from root dir
 CONDA_ENV="pytorch1.7"
 
@@ -68,7 +68,7 @@ PYTHON_ARGS="\
 --size 128 128 32 \
 --num-samples 1 \
 --batch-size 1 \
---tau 1 \
+--tau 0.1 \
 "
 echo "- found args $PYTHON_ARGS"
 
