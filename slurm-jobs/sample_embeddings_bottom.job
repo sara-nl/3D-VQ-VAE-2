@@ -1,18 +1,18 @@
 #!/bin/bash
 
-#SBATCH --job-name sample-embeddings-bottom-hightau
+#SBATCH --job-name sample-embeddings-bottom-lowtau
 #SBATCH -N 1
 #SBATCH -c 6
 #SBATCH -t 2-00:00:00
-#SBATCH -p gpu_titanrtx-shared
+#SBATCH -p gpu_rtx2080ti_shared
 #SBATCH -o slurm-%j-%x.out
 #SBATCh -e slurm-%j-%x.out
 export OMP_NUM_THREADS=6
 
 # Flags made to be edited
 HIERARCHY_LEVEL="2" # Should be a non-negative integer, 0 = top, 1 = mid, 2 = bottom 
-DATASET_NAME="version_7418961_last_lowtau"
-MODEL_CHECKPOINT_PATH="slurm-jobs/lightning_logs/version_7439612/checkpoints/epoch=74-step=7896.ckpt" # from root dir
+DATASET_NAME="version_7446231_epoch_1214_lowtau"
+MODEL_CHECKPOINT_PATH="slurm-jobs/lightning_logs/version_7453173/checkpoints/epoch=252-step=26817.ckpt" # from root dir
 CONDA_ENV="pytorch1.7"
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"

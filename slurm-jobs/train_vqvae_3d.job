@@ -84,7 +84,7 @@ $DATASET_INDIR \
 --n-post-quantization-blocks 50 \
 --n-post-upscale-blocks 3 \
 --n-post-downscale-blocks 2 \
---resume_from_checkpoint $ROOT_DIR/slurm-jobs/lightning_logs/version_7435930/checkpoints/last.ckpt \
+--resume_from_checkpoint $ROOT_DIR/slurm-jobs/lightning_logs/version_7436231/checkpoints/last.ckpt \
 "
 echo "- found args $PYTHON_ARGS"
 

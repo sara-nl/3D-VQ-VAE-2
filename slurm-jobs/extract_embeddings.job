@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH -N 1
-#SBATCH -t 5-00:00:00
+#SBATCH -t 1-00:00:00
 #SBATCH -p gpu_titanrtx_shared
 export OMP_NUM_THREADS=6
 
@@ -58,7 +58,7 @@ echo "- setting args"
 PYTHON_ARGS="\
 --dataset-path $DATASET_INDIR \
 --output-path $OUTPUT_PATH \
---checkpoint-path $ROOT_DIR/slurm-jobs/lightning_logs/version_7435930/checkpoints/epoch=998-step=105787.ckpt \
+--checkpoint-path $ROOT_DIR/slurm-jobs/lightning_logs/version_7446231/checkpoints/epoch=1214-step=128683.ckpt \
 "
 echo "- found args $PYTHON_ARGS"
 

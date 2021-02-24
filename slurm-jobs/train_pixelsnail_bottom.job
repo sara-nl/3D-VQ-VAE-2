@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name pixelsnail-bottom-rfgrow-512wide-lazy-rfgrow
+#SBATCH --job-name pixelsnail-bottom-rfgrow-512wide-lazyrfgrow-prepadshift-replicatepad
 #SBATCH -N 1
 #SBATCH -c 6
 #SBATCH --ntasks-per-node 4
@@ -12,7 +12,7 @@ export OMP_NUM_THREADS=6
 
 # Flags made to be edited
 HIERARCHY_LEVEL="2" # Should be a non-negative integer, 0 = top, 1 = mid, 2 = bottom 
-DATASET_NAME="version_7435930_epoch_998.lmdb"
+DATASET_NAME="version_7446231_epoch_1214.lmdb"
 CONDA_ENV="pytorch1.7"
 METRIC="cross_entropy"
 
@@ -83,7 +83,7 @@ $HIERARCHY_LEVEL \
 --num-resblocks 50 \
 --model-dim 512 \
 --dropout-prob 0.5 \
---use-conditioning True \
+--use-conditioning False \
 --use-pre-activation True \
 --bottleneck-divisor 4 \
 --use-concat-activation False \

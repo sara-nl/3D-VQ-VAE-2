@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name pixelsnail-mid-rfgrow-45long-256wide-outputfix-condfix
+#SBATCH --job-name pixelsnail-mid-45long-256wide-lazyrfgrow-prepadshift
 #SBATCH -N 3
 #SBATCH -c 6
 #SBATCH --ntasks-per-node 4
@@ -11,7 +11,7 @@
 
 # Flags made to be edited
 HIERARCHY_LEVEL="1" # Should be a non-negative integer, 0 = top, 1 = mid, 2 = bottom 
-DATASET_NAME="version_7435930_epoch_998.lmdb"
+DATASET_NAME="version_7446231_epoch_1214.lmdb"
 CONDA_ENV="pytorch1.7"
 METRIC="cross_entropy"
 
