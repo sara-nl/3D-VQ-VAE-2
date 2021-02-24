@@ -30,9 +30,9 @@ def idx_to_one_hot(data: torch.LongTensor, num_classes: int) -> torch.FloatTenso
                      'b d h w c -> b c d h w').to(torch.float)
 
 
-class PixelSNAIL(pl.LightningModule):
+class PixelCNN(pl.LightningModule):
     def __init__(self, args):
-        super(PixelSNAIL, self).__init__()
+        super().__init__()
         self.save_hyperparameters()
         self._parse_input_args(args)
 
@@ -49,24 +49,13 @@ class PixelSNAIL(pl.LightningModule):
             kernel_size=1
         )
 
-        # condition_dim = (
-        #     self.condition_dim
-        #     if self.use_gated_block
-        #     else (
-        #         self.model_dim // self.bottleneck_divisor
-        #         if self.condition_dim != 0
-        #         else 0
-        #     )
-        # )
-
-        condition_dim = self.model_dim
+        condition_dim = self.model_dim if self.use_conditioning else 0
 
         self.embed_condition = nn.Conv3d(
             in_channels=self.condition_dim,
             out_channels=condition_dim,
             kernel_size=1
         ) if self.use_conditioning else None
-
 
         self.layers = nn.ModuleList([
             self.causal_conv(
@@ -132,7 +121,6 @@ class PixelSNAIL(pl.LightningModule):
                 size=dim, mode='trilinear'
             ).detach()
         data = data.squeeze(dim=1).detach()
-
         logits = self(
             data=idx_to_one_hot(data, num_classes=self.input_dim).detach(),
             condition=condition
@@ -223,7 +211,7 @@ class PixelSNAIL(pl.LightningModule):
         batch, *dims = size
         size = (batch, self.input_dim, *dims)
 
-        result = torch.zeros(size, dtype=torch.half, device=self.device) # mypy: ignore
+        result = torch.full(size, -1, dtype=torch.half, device=self.device) # mypy: ignore
 
         if condition is not None:
             condition = F.interpolate(
@@ -231,23 +219,21 @@ class PixelSNAIL(pl.LightningModule):
                 size=dims, mode='trilinear'
             ).to(torch.half)
             condition_cache = self._generate_condition_cache(condition)
-
-
+        breakpoint()
         # Full forward pass, to check for memory errors
-        self.forward(
-            data=result,
-            condition_cache=(
-                condition_cache.copy()
-                if condition is not None
-                else None
-            )
-        )
-
+        # self.forward(
+        #     data=result,
+        #     condition_cache=(
+        #         condition_cache.copy()
+        #         if condition is not None
+        #         else None
+        #     )
+        # )
         # iterate over all dimensions
         max_dim = [0 for _ in dims]
         for dim in tqdm(product(*tuple(range(dim) for dim in dims)), total=math.prod(dims)):
-            for i, (d, max_d) in enumerate(zip(dim, max_dim)):
-                max_dim[i] = max(d+1, max_d)
+            for i in range(len(max_dim)):
+                max_dim[i] = max(dim[i]+1, max_dim[i])
 
             current_slice = (..., *(slice(max_d) for max_d in max_dim))
             current_sample = (..., *(d for d in dim))
@@ -260,7 +246,10 @@ class PixelSNAIL(pl.LightningModule):
                     else None
                 )
             )
-            result[current_sample] = sampling_f(out[current_sample])
+
+            sample = sampling_f(out[current_sample])
+
+            result[current_sample] = sample
 
         # FIXME: remove the argmax
         return torch.argmax(result, dim=1)
@@ -270,10 +259,8 @@ class PixelSNAIL(pl.LightningModule):
         # but that would be a bit risky considering that then the iteration order
         # would depend on the initialisation order.
         # Using the way below, we explicitely control the calling order of layers.
-        return deque([
-            (condition := layer.condition(condition))
-            for layer in self.layers
-        ])
+        condition = self.embed_condition(condition)
+        return deque([layer.condition(condition) for layer in self.layers])
 
 
     def forward( # mypy: ignore
@@ -287,7 +274,7 @@ class PixelSNAIL(pl.LightningModule):
 
         stack = input_to_stack(self.parse_input(data))
 
-        if not (self.embed_condition is None and self.condition_cache is None):
+        if self.embed_condition is not None and condition_cache is None:
             condition = self.embed_condition(condition)
 
         for layer in self.layers:

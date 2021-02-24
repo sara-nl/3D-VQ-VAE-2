@@ -103,8 +103,7 @@ def input_to_stack(input: torch.Tensor) -> torch.Tensor:
     return repeat(input, 'b c d h w -> dim b c d h w', dim=3)
 
 def stack_to_output(stack: torch.Tensor) -> torch.Tensor:
-    depth, height, width = stack
-    return shift_down_3d(height) + shift_backwards_3d(depth) + width
+    return stack.sum(dim=0)
 
 def restack(depth, height, width):
     return rearrange([depth, height, width], 'dim b c d h w -> dim b c d h w')
@@ -183,6 +182,8 @@ class CausalConv3dAdd(nn.Module):
     ):
         super().__init__()
         assert 'padding' not in conv_kwargs
+        self.padding_mode = 'constant'
+
         assert mask in ('A', 'B')
         self.mask = mask
 
@@ -212,11 +213,16 @@ class CausalConv3dAdd(nn.Module):
     def forward(self, stack):
         depth, height, width = stack
 
-        depth  = self.depth_conv(F.pad(depth, pad=self.depth_pad))
-        height = self.height_conv(F.pad(height, pad=self.height_pad))
-        width = self.width_conv(F.pad(width, pad=self.width_pad))
+        if self.mask == 'A':
+            depth = shift_backwards_3d(depth)
+            height = shift_down_3d(height)
+            width = shift_right_3d(width)
 
-        width = shift_right_3d(width) if self.mask == 'A' else width
+        # The padding below only works with the mask 'A' padding done beforehand
+        depth = self.depth_conv(F.pad(depth, pad=self.depth_pad, mode=self.padding_mode))
+        height = self.height_conv(F.pad(height, pad=self.height_pad, mode=self.padding_mode))
+        width = self.width_conv(F.pad(width, pad=self.width_pad, mode=self.padding_mode))
+
 
         return rearrange([depth, height, width], 'dim b c d h w -> dim b c d h w')
 
@@ -237,18 +243,13 @@ class ExpandRFConv(nn.Module):
             kernel_size=1,
         )
 
-    def forward(self, stack, condition=None):
+    def forward(self, stack):
         depth, height, width = stack
 
-        depth_conv_height, depth_conv_width = torch.chunk(shift_backwards_3d(self.depth_conv(depth)), chunks=2, dim=1)
+        depth_conv_height, depth_conv_width = torch.chunk(self.depth_conv(depth), chunks=2, dim=1)
 
+        width = width + self.height_conv(height) + depth_conv_width
         height = height + depth_conv_height
-        width = width + shift_down_3d(self.height_conv(height)) + depth_conv_width
-
-        if condition is not None:
-            depth = depth + shift_forwards_3d(condition)
-            height = height + shift_up_3d(condition)
-            width = width + condition
 
         return restack(depth, height, width)
 
@@ -435,9 +436,9 @@ class PreActFixupCausalResBlock(nn.Module):
                 condition = self.condition(condition)
 
             dim = out.shape[-3:] # volumetric size of stack
-            condition = condition[..., :dim[0], :dim[1], :dim[2]]
+            out = out + condition[..., :dim[0], :dim[1], :dim[2]]
 
-        out = self.expand_rf(out, condition=condition)
+        out = self.expand_rf(out)
 
         out = self.activation(out + self.bias2a)
         out = self.branch_conv2(out + self.bias2b)
