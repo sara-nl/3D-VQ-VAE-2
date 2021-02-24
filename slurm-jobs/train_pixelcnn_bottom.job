@@ -1,16 +1,17 @@
 #!/bin/bash
 
-#SBATCH --job-name pixelsnail-mid-45long-256wide-lazyrfgrow-prepadshift
-#SBATCH -N 3
+#SBATCH --job-name pixelcnn-bottom-rfgrow-512wide-lazyrfgrow
+#SBATCH -N 1
 #SBATCH -c 6
 #SBATCH --ntasks-per-node 4
-#SBATCH -t 2-00:00:00
-#SBATCH -p gpu_rtx2080ti
+#SBATCH -t 01-00:00:00
+#SBATCH -p gpu_titanrtx
 #SBATCH -o slurm-%j-%x.out
 #SBATCh -e slurm-%j-%x.out
+export OMP_NUM_THREADS=6
 
 # Flags made to be edited
-HIERARCHY_LEVEL="1" # Should be a non-negative integer, 0 = top, 1 = mid, 2 = bottom 
+HIERARCHY_LEVEL="2" # Should be a non-negative integer, 0 = top, 1 = mid, 2 = bottom 
 DATASET_NAME="version_7446231_epoch_1214.lmdb"
 CONDA_ENV="pytorch1.7"
 METRIC="cross_entropy"
@@ -75,16 +76,17 @@ echo "- setting args"
 PYTHON_ARGS="\
 $DATASET_INDIR \
 $HIERARCHY_LEVEL \
---batch-size 2 \
+--batch-size 6 \
 --metric $METRIC \
---lr "$(( $NUM_NODES ))"e-4 \
+--lr "$NUM_NODES"e-5 \
 --num_nodes $NUM_NODES \
---num-resblocks 45 \
---model-dim 256 \
+--num-resblocks 50 \
+--model-dim 512 \
 --dropout-prob 0.5 \
---use-conditioning True \
+--use-conditioning False \
 --use-pre-activation True \
 --bottleneck-divisor 4 \
+--use-concat-activation False \
 "
 echo "- found args $PYTHON_ARGS"
 
@@ -99,5 +101,5 @@ else
     echo "- copying dataset"
     rsync -ah --info=progress2 "$DATASET_PATH" "$INDIR"
     echo "- starting run"
-    python "$SCRIPTPATH" $PYTHON_ARGS
+    srun python "$SCRIPTPATH" $PYTHON_ARGS
 fi
