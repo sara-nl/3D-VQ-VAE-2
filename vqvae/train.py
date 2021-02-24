@@ -17,8 +17,10 @@ def parse_arguments():
     parser = pl.Trainer.add_argparse_args(parser)
     parser = VQVAE.add_model_specific_args(parser)
 
+    parser.add_argument('--rescale-input', type=int, nargs='+')
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("dataset_path", type=Path)
+
 
     parser.set_defaults(
         gpus="-1",
@@ -47,7 +49,7 @@ def main(args):
 
     pl.trainer.seed_everything(seed=42)
 
-    datamodule = CTDataModule(path=args.dataset_path, batch_size=args.batch_size, num_workers=5)
+    datamodule = CTDataModule(path=args.dataset_path, batch_size=args.batch_size, num_workers=5, rescale_input=args.rescale_input)
 
     model = VQVAE(args)
 

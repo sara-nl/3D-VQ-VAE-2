@@ -12,7 +12,7 @@ import torch.nn as nn
 
 from model import VQVAE
 from utils import CTDataModule
-from metrics.ssim import SSIM3DSlices
+from metrics.evaluate import SSIM3DSlices
 
 
 def main(args: Namespace):
@@ -20,7 +20,7 @@ def main(args: Namespace):
     pl.trainer.seed_everything(seed=42)
 
     print("- Loading datamodule")
-    datamodule = CTDataModule(path=args.dataset_path, batch_size=1, num_workers=5) # mypy: ignore
+    datamodule = CTDataModule(path=args.dataset_path, batch_size=5, num_workers=5) # mypy: ignore
     datamodule.setup()
 
     train_dl = datamodule.train_dataloader()
@@ -38,13 +38,14 @@ def main(args: Namespace):
     def batch_ssim(batch, ssim_f):
         batch = batch.cuda()
         out, *_ = model(batch)
-        out = F.softplus(out)
-        return val_ssim(out, batch)
+        out = F.elu(out)
+        return val_ssim(out.float(), batch)
 
     with torch.no_grad(), torch.cuda.amp.autocast():
         val_ssims = torch.Tensor([
             batch_ssim(batch, ssim_f=val_ssim) for batch, _ in tqdm(val_dl)
         ])
+        breakpoint()
         train_ssims = torch.Tensor([
             batch_ssim(batch, ssim_f=train_ssim) for batch, _ in tqdm(train_dl)
         ])

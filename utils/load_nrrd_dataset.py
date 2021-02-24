@@ -1,9 +1,9 @@
-from functools import lru_cache
+from functools import lru_cache, partial
 from itertools import chain, tee
 from random import shuffle, sample, randint
 from pathlib import Path
 from copy import copy
-from typing import Union, Sequence, Tuple
+from typing import Union, Sequence, Tuple, Optional
 
 import nrrd
 import numpy as np
@@ -44,9 +44,21 @@ class DepthPadAndCrop(torch.nn.Module):
         return F.pad(x, (0, pad_size, 0, 0, 0, 0))[..., :self.output_depth], num_valid_slices
 
 
+class Interpolate(torch.nn.Module):
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.interpolate = partial(F.interpolate, **kwargs)
+
+    def forward(self, x):
+        #FIXME: This horrible hack
+        if isinstance(x, int):
+            return x
+        else:
+            return self.interpolate(x.unsqueeze(dim=0)).squeeze(dim=0)
+
 
 class CTDataModule(pl.LightningDataModule):
-    def __init__(self, path, batch_size=64, train_frac=0.95, num_workers=6):
+    def __init__(self, path, batch_size=64, train_frac=0.95, num_workers=6, rescale_input: Optional[Tuple[int, int, int]] = []):
         super().__init__()
         assert 0 <= train_frac <= 1
 
@@ -54,6 +66,7 @@ class CTDataModule(pl.LightningDataModule):
         self.train_frac = train_frac
         self.num_workers = num_workers
         self.batch_size = batch_size
+        self.rescale_input = rescale_input
 
     def setup(self, stage=None):
         # transform
@@ -68,6 +81,9 @@ class CTDataModule(pl.LightningDataModule):
             transforms.ToTensor(),
             DepthPadAndCrop(output_depth=128), # needs to be last because it outputs the label
         ])
+
+        if self.rescale_input:
+            transform = transforms.Compose([transform, Interpolate(size=self.rescale_input, mode='area')])
 
         dataset = CTScanDataset(self.path, transform=transform, spacing=(0.976, 0.976, 3))
 
