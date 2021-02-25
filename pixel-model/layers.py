@@ -1,3 +1,4 @@
+import math
 from typing import Union, Callable, Type
 from operator import attrgetter
 from functools import partial
@@ -136,7 +137,7 @@ class CausalConv3dAdd(nn.Module):
       stack appropriately into the 'width' stack.
       This means that somewhere before model output the following should be done:
       `out = shift_down_3d(shift_backwards_3d(depth) + height) + width`
-    - If causality is broken such that information flows directly from the 
+    - If causality is broken such that information flows directly from the
       input pixel to the output pixel, validation loss will go to zero almost immediately.
     - If the causality is not perfectly managed, the model as a whole will underperform.
 
@@ -149,7 +150,7 @@ class CausalConv3dAdd(nn.Module):
 
     Example 1:
     Assuming the stack consists of [height, width]:
-    height: [[1, 2],  width: [[5, 6], 
+    height: [[1, 2],  width: [[5, 6],
              [3, 4]]          [7, 8]]
     - The information at position 1 is always the information for position 7
     If mask == 'A':
@@ -234,7 +235,6 @@ class ExpandRFConv(nn.Module):
             in_channels=in_channels,
             out_channels=in_channels*2,
             kernel_size=1,
-            groups=2
         )
 
         self.height_conv = nn.Conv3d(
@@ -349,11 +349,12 @@ class PreActFixupCausalResBlock(nn.Module):
         kernel_size: int,
         mask: str = 'B',  # options are ('A', 'B')
         condition_dim: int = 0, #
-        condition_kernel_size: int = 3, # ignored if condition_dim == 0
+        condition_kernel_size: int = 1, # ignored if condition_dim == 0
         activation: Type[nn.Module] = nn.ELU,
         dropout_prob: float = 0.5,
         bottleneck_divisor: int = 4, # set to 1 to disable bottlenecking
         concat_activation: bool = False,
+        aux = False,
         #Catch spurious (keyword-)arguments
         *args,
         **kwargs
@@ -417,15 +418,34 @@ class PreActFixupCausalResBlock(nn.Module):
             bias=True
         ) if condition_dim > 0 else None
 
+        self.aux = CausalConv3dAdd(
+            in_channels=branch_channels,
+            out_channels=branch_channels,
+            kernel_size=1,
+            bias=True
+        ) if aux else None
+
         self.activation = activation() if not concat_activation else ConcatActivation(activation, dim=2)
 
         self.dropout = nn.Dropout3d(dropout_prob) if dropout_prob > 0 else None
 
-    def forward(self, stack: torch.Tensor, condition: torch.Tensor = None, condition_cache = None):
+    def forward(self, stack: torch.Tensor, aux: torch.Tensor = None, condition: torch.Tensor = None, condition_cache = None):
         out = stack
 
         out = self.activation(out + self.bias1a)
         out = self.branch_conv1(out + self.bias1b)
+
+        out = self.expand_rf(out)
+
+        if aux is not None:
+            assert self.aux is not None
+            out = out + self.aux(self.activation(aux))
+
+        out = self.activation(out + self.bias2a)
+        out = self.branch_conv2(out + self.bias2b)
+
+        if self.dropout is not None:
+            out = self.dropout(out)
 
         if not (condition is None and condition_cache is None):
             # deliberately prefer condition_cache over computing condition again
@@ -435,16 +455,8 @@ class PreActFixupCausalResBlock(nn.Module):
                 assert self.condition is not None, 'Condition projection matrix not initialised!'
                 condition = self.condition(condition)
 
-            dim = out.shape[-3:] # volumetric size of stack
-            out = out + condition[..., :dim[0], :dim[1], :dim[2]]
-
-        out = self.expand_rf(out)
-
-        out = self.activation(out + self.bias2a)
-        out = self.branch_conv2(out + self.bias2b)
-
-        if self.dropout is not None:
-            out = self.dropout(out)
+            # add condition equally and volumetrically to all stacks
+            out = out + condition[(..., *(slice(d) for d in out.shape[-3:]))]
 
         out = self.activation(out + self.bias3a)
         out = self.branch_conv3(out + self.bias3b)
@@ -453,7 +465,7 @@ class PreActFixupCausalResBlock(nn.Module):
 
         out = out + (stack if self.skip_conv is None else self.skip_conv(stack))
 
-        return out, condition_cache
+        return out
 
     @torch.no_grad()
     def initialize_weights(self, num_layers):
@@ -469,8 +481,9 @@ class PreActFixupCausalResBlock(nn.Module):
             )
 
         # branch_conv2 & branch_conv3
-        for weight in map(weight_getter, (self.branch_conv2, self.branch_conv3)):
-            torch.nn.init.constant_(weight, val=0)
+        for conv_weights in map(weight_getter, (self.branch_conv2, self.branch_conv3)):
+            for weight in conv_weights:
+                torch.nn.init.constant_(weight, val=0)
 
         # skip_conv
         if self.skip_conv is not None:
@@ -502,7 +515,7 @@ class GatedResBlock(nn.Module):
     ):
         super().__init__()
 
-        
+
         self.causal_conv = CausalConv3dAdd(
             in_channels=in_channels,
             out_channels=in_channels*2,
@@ -594,3 +607,107 @@ class GatedResBlock(nn.Module):
         ], 'dim b c d h w -> dim b c d h w')
 
         return stack, condition, condition_cache
+
+
+class CausalAttention(nn.Module):
+    def __init__(self, dropout_prob=0.5, num_heads=8):
+        super().__init__()
+        self.num_heads = num_heads
+        self.dropout = nn.Dropout(dropout_prob)
+
+    def forward(self, keys, queries, values, attn_mask):
+        stack_dim, b, num_keys, *dims = keys.shape
+        num_values = values.shape[2]
+
+        nh = self.num_heads
+        assert num_values % nh == 0
+        assert num_keys % nh == 0
+
+        embed_dim = math.prod(dims)
+        # split channels into multiple heads, flatten H,W dims and scale q; out (B, nh, dkh or dvh, HW)
+        flat_q = queries.reshape(stack_dim, b, nh, num_keys//nh, embed_dim) * (num_keys//nh) ** -0.5
+        flat_k = keys.reshape(stack_dim, b, nh, num_keys//nh, embed_dim)
+        flat_v = values.reshape(stack_dim, b, nh, num_values//nh, embed_dim)
+
+        logits = torch.matmul(flat_q.transpose(3,4), flat_k)              # (B,nh,HW,dq) dot (B,nh,dq,HW) = (B,nh,HW,HW)
+
+        logits = self.dropout(logits)
+
+        logits = logits.masked_fill(~attn_mask, float('-inf'))
+        weights = F.softmax(logits, -1)
+
+        attn_out = torch.matmul(weights, flat_v.transpose(3,4))           # (B,nh,HW,HW) dot (B,nh,HW,dvh) = (B,nh,HW,dvh)
+        attn_out = attn_out.transpose(3,4)                                # (B,nh,dvh,HW)
+        return attn_out.reshape(stack_dim, b, -1, *dims)                              # (B,dv,H,W)
+
+
+# class CausalAttention(nn.Module):
+#     def __init__(self, *mha_args, **mha_kwargs):
+#         super().__init__()
+#         self.causal_attention = nn.ModuleList([
+#             nn.MultiheadAttention(*mha_args, **mha_kwargs)
+#             for _ in range(3)
+#         ])
+
+#     def forward(self, queries, keys, values, attn_mask):
+#         return restack(*(
+#             causal_attention(query, key, value, need_weights=False, attn_mask=attn_mask)
+#             for causal_attention, query, key, value in zip(
+#                 self.causal_attention, queries, keys, values
+#             )
+#         ))
+
+
+class CausalAttentionPixelBlock(nn.Module):
+    '''3D attention with causal convs'''
+    def __init__(
+        self,
+        in_channels: int,
+        bottleneck_divisor: int,
+        num_layers: int,
+        causal_conv: nn.Module,
+        # attention specific
+        num_heads: int = 8,
+        attention_dropout_prob = 0.5
+    ):
+        super().__init__()
+        # stack + out + background
+        branch_channels = in_channels // bottleneck_divisor
+        self.key_value_proj = CausalConv3dAdd(
+            in_channels=(in_channels * 2 + 3),
+            out_channels=(branch_channels * 2),
+            kernel_size=1
+        )
+        # stack + background
+        self.query_proj = CausalConv3dAdd(
+            in_channels=(in_channels + 3),
+            out_channels=branch_channels,
+            kernel_size=1
+        )
+
+        self.causal_layers = nn.ModuleList([causal_conv() for _ in range(num_layers)])
+
+        self.causal_attention = CausalAttention(dropout_prob=attention_dropout_prob, num_heads=num_heads)
+
+        self.out_proj = causal_conv(aux=True)
+
+    def forward(self, stack, background, attn_mask, condition = None, condition_cache = None):
+        out = stack
+
+        for layer in self.causal_layers:
+            out = layer(out, condition=condition, condition_cache=condition)
+
+        # stack, out, and background should have the same shape
+        keys, values = torch.chunk(self.key_value_proj(torch.cat([stack, out, background], dim=2)), chunks=2, dim=2)
+        queries = self.query_proj(torch.cat([out, background], dim=2))
+
+        attn_out = self.causal_attention(queries, keys, values, attn_mask=attn_mask)
+
+        out = self.out_proj(
+            out,
+            aux=attn_out,
+            condition=condition,
+            condition_cache=condition_cache
+        )
+
+        return out

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name pixelsnail-top-lazyrfgrow-prepadshift
+#SBATCH --job-name pixelcnn-top-lazyrfgrow-prepadshift
 #SBATCH -N 6
 #SBATCH -c 6
 #SBATCH --ntasks-per-node 4

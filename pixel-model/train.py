@@ -54,7 +54,6 @@ def parse_arguments():
 
 def main(args):
     torch.cuda.empty_cache()
-
     pl.trainer.seed_everything(seed=42)
 
     datamodule = LMDBDataModule(path=args.dataset_path, embedding_id=args.level, batch_size=args.batch_size, num_workers=5)
