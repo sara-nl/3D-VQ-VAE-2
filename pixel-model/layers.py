@@ -629,11 +629,12 @@ class CausalAttention(nn.Module):
         flat_k = keys.reshape(stack_dim, b, nh, num_keys//nh, embed_dim)
         flat_v = values.reshape(stack_dim, b, nh, num_values//nh, embed_dim)
 
-        logits = torch.matmul(flat_q.transpose(3,4), flat_k)              # (B,nh,HW,dq) dot (B,nh,dq,HW) = (B,nh,HW,HW)
-
+        logits = torch.matmul(flat_q.transpose(3,4), flat_k)            # (B,nh,HW,dq) dot (B,nh,dq,HW) = (B,nh,HW,HW)
         logits = self.dropout(logits)
 
         logits = logits.masked_fill(~attn_mask, float('-inf'))
+        logits = logits.masked_fill(logits == 0, 1e-7)
+
         weights = F.softmax(logits, -1)
 
         attn_out = torch.matmul(weights, flat_v.transpose(3,4))           # (B,nh,HW,HW) dot (B,nh,HW,dvh) = (B,nh,HW,dvh)
@@ -692,6 +693,7 @@ class CausalAttentionPixelBlock(nn.Module):
         self.out_proj = causal_conv(aux=True)
 
     def forward(self, stack, background, attn_mask, condition = None, condition_cache = None):
+
         out = stack
 
         for layer in self.causal_layers:
