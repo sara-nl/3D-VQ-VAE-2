@@ -81,7 +81,7 @@ class PixelCNN(pl.LightningModule):
         num_layers = self.num_resblocks+1 # plus input/output resblocks
         self.apply(
             lambda layer: layer.initialize_weights(num_layers=num_layers)
-                          if isinstance(layer, FixupCausalResBlock)
+                          if isinstance(layer, PreActFixupCausalResBlock)
                           else None
         )
 
@@ -278,6 +278,6 @@ class PixelCNN(pl.LightningModule):
             condition = self.embed_condition(condition)
 
         for layer in self.layers:
-            stack, condition_cache = layer(stack, condition, condition_cache)
+            stack = layer(stack=stack, condition=condition, condition_cache=condition_cache)
 
         return self.parse_output(stack_to_output(stack))

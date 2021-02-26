@@ -116,7 +116,6 @@ class PixelSNAIL(pl.LightningModule):
         return loss
 
     def cross_entropy(self, batch, batch_idx, metrics: dict):
-
         # no_grad to save some MBs
         with torch.no_grad():
 

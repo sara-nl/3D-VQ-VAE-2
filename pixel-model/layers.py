@@ -121,6 +121,10 @@ class ConcatActivation(nn.Module):
 
 class CausalConv3dAdd(nn.Module):
     r'''
+
+    XXX: this information is outdated
+
+
     Layer that convolves a stack of three tensors in a causal manner.
     The stack of three tensors should be in the order:
     1. depth-wise
@@ -445,7 +449,7 @@ class PreActFixupCausalResBlock(nn.Module):
         out = self.branch_conv2(out + self.bias2b)
 
         if self.dropout is not None:
-            out = self.dropout(out)
+            out = restack(*map(self.dropout, out))
 
         if not (condition is None and condition_cache is None):
             # deliberately prefer condition_cache over computing condition again
@@ -480,10 +484,12 @@ class PreActFixupCausalResBlock(nn.Module):
                 std=np.sqrt(2 / (weight.shape[0] * np.prod(weight.shape[2:]))) * num_layers ** (-0.5)
             )
 
+        for weight in weight_getter(self.branch_conv2):
+            torch.nn.init.kaiming_normal_(weight)
+
         # branch_conv2 & branch_conv3
-        for conv_weights in map(weight_getter, (self.branch_conv2, self.branch_conv3)):
-            for weight in conv_weights:
-                torch.nn.init.constant_(weight, val=0)
+        for weight in weight_getter(self.branch_conv3):
+            torch.nn.init.constant_(weight, val=0)
 
         # skip_conv
         if self.skip_conv is not None:
@@ -630,10 +636,13 @@ class CausalAttention(nn.Module):
         flat_v = values.reshape(stack_dim, b, nh, num_values//nh, embed_dim)
 
         logits = torch.matmul(flat_q.transpose(3,4), flat_k)            # (B,nh,HW,dq) dot (B,nh,dq,HW) = (B,nh,HW,HW)
+
+        # replace dropped values with a very large negative number instead of -inf to prevent nans in the output
         logits = self.dropout(logits)
+        logits = logits.masked_fill(logits == 0, -1e3)
+
 
         logits = logits.masked_fill(~attn_mask, float('-inf'))
-        logits = logits.masked_fill(logits == 0, 1e-7)
 
         weights = F.softmax(logits, -1)
 
