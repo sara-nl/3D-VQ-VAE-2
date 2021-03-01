@@ -50,7 +50,8 @@ def main(args):
         path=args.dataset_path,
         batch_size=1,
         train_frac=1,
-        num_workers=5
+        num_workers=5,
+        rescale_input=(256,256,128)
     )
     datamodule.setup()
     dataloader = datamodule.train_dataloader()

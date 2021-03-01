@@ -19,44 +19,23 @@ def main(args: Namespace):
 
     min_val, max_val, scale_val = -1500, 3000, 1000
 
-    # transform = transforms.Compose([
-    #     transforms.AddChannel(),
-    #     transforms.ThresholdIntensity(threshold=max_val, cval=max_val, above=False),
-    #     transforms.ThresholdIntensity(threshold=min_val, cval=min_val, above=True),
-    #     transforms.ScaleIntensity(minv=None, maxv=None, factor=(-1 + 1/scale_val)),
-    #     transforms.ShiftIntensity(offset=1),
-    #     # transforms.SpatialPad(spatial_size=(512, 512, 128), mode='constant'),
-    #     # transforms.SpatialCrop(roi_size=(512, 512, 128), roi_center=(256, 256, 64)),
-    #     # transforms.Resize(spatial_size=(256, 256, 128)),
-    #     transforms.ToTensor(),
-    #     # torch.nn.Softplus(),
-    #     DepthPadAndCrop(output_depth=128, center=64)
-    # ])
-
-    # print("- Loading dataloader")
-    # dataset = CTScanDataset(args.dataset_path, transform=transform, spacing=(0.976, 0.976, 3))
-    # train_loader = DataLoader(dataset, batch_size=1, num_workers=0, pin_memory=True)
-
-    # print("- Loading single CT sample")
-    # single_sample, _ = next(iter(train_loader))
-    # single_sample = single_sample.cuda()
-
     print("- Loading model weights")
     model = VQVAE.load_from_checkpoint(str(args.ckpt_path)).cuda()
 
     db = torch.load(args.db_path)
-    breakpoint()
 
-    for i, embedding_0 in enumerate(db[0].values()):
-        embedding_1 = db[1][embedding_0['condition']]
-        embedding_2 = db[2][embedding_1['condition']]
+    for i, embedding_0 in enumerate(db[1].values()):
+        # embedding_1 = db[1][embedding_0['condition']]
+        # embedding_2 = db[2][embedding_1['condition']]
+        embedding_1 = embedding_0
+        embedding_0 = {'data': torch.zeros((64,64,32)).long()}
 
         embeddings = [
             quantizer.embed_code(embedding['data'].cuda().unsqueeze(dim=0)).permute(0, 4, 1, 2, 3)
             for embedding, quantizer
-            in zip((embedding_0, embedding_1, embedding_2), model.encoder.quantize)
+            in zip((embedding_0, embedding_1), model.encoder.quantize)
         ]
-
+        breakpoint()
         print("- Performing forward pass")
         with torch.cuda.amp.autocast():
             res = model.decode(embeddings)

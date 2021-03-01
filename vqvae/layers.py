@@ -103,7 +103,7 @@ class PreActFixupResBlock(nn.Module):
     # Adapted from:
     # https://github.com/hongyi-zhang/Fixup/blob/master/imagenet/models/fixup_resnet_imagenet.py#L20
 
-    def __init__(self, in_channels, out_channels, mode, activation=nn.ELU, bottleneck_divisor=4):
+    def __init__(self, in_channels, out_channels, mode, activation=nn.ELU, bottleneck_divisor=2):
         super().__init__()
 
         padding_mode = 'circular'
