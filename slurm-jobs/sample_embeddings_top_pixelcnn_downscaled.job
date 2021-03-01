@@ -1,14 +1,19 @@
 #!/bin/bash
 
+#SBATCH --job-name sample-embeddings-top-lowtau
 #SBATCH -N 1
-#SBATCH -t 1-00:00:00
-#SBATCH -p gpu_titanrtx_shared
+#SBATCH -c 6
+#SBATCH --ntasks-per-node 1
+#SBATCH -t 5-00:00:00
+#SBATCH -p gpu_rtx2080ti_shared
+#SBATCH -o slurm-%j-%x.out
+#SBATCh -e slurm-%j-%x.out
 export OMP_NUM_THREADS=6
 
 # Flags made to be edited
-DATASET_NAME="14"
-DATASET_EXT=".tar" # must be .tar
-DATASET_ROOT="/project/robertsc/"
+HIERARCHY_LEVEL="0" # Should be a non-negative integer, 0 = top, 1 = mid, 2 = bottom 
+DATASET_NAME="version_7464547_epoch_279_zerozeroonetau_mixup"
+MODEL_CHECKPOINT_PATH="slurm-jobs/lightning_logs/version_7485560/checkpoints/last.ckpt" # from root dir
 CONDA_ENV="pytorch1.7"
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
@@ -35,8 +40,9 @@ echo "- activating conda env $CONDA_ENV"
 source deactivate
 source activate "$CONDA_ENV"
 
-SCRIPT_PATH="$ROOT_DIR/vqvae/extract_embeddings.py"
-OUTPUT_PATH="$ROOT_DIR/vqvae/codes"
+SCRIPT_PATH="$ROOT_DIR/pixel-model/sample_embeddings.py"
+IO_PATH="$ROOT_DIR/pixel-model/codes"/$DATASET_NAME'.pt'
+CKPT_PATH="$ROOT_DIR"/"$MODEL_CHECKPOINT_PATH"
 
 INDIR="$TMPDIR"
 if [ -z $INDIR ]; then
@@ -56,15 +62,16 @@ echo "- assuming Dataset path $DATASET_PATH"
 
 echo "- setting args"
 PYTHON_ARGS="\
---dataset-path $DATASET_INDIR \
---output-path $OUTPUT_PATH \
---checkpoint-path $ROOT_DIR/slurm-jobs/lightning_logs/version_7464547/checkpoints/epoch=279-step=29679.ckpt \
+--model-checkpoint $CKPT_PATH \
+--db-path $IO_PATH \
+--level $HIERARCHY_LEVEL \
+--size 64 64 32 \
+--num-samples 1 \
+--batch-size 1 \
+--tau 0.01 \
+--use-model pixelcnn \
 "
 echo "- found args $PYTHON_ARGS"
 
-echo "- copying dataset"
-rsync -ah --info=progress2 "$DATASET_PATH" "$INDIR"
-echo "- untarring dataset"
-tar -xkf "$INDIR"/"$DATASET_NAME".tar -C "$INDIR"
 echo "- starting run"
 python "$SCRIPT_PATH" $PYTHON_ARGS
