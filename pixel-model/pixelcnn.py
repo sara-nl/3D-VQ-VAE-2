@@ -1,4 +1,5 @@
 import math
+from random import randrange
 from functools import partial
 from itertools import product, chain
 from argparse import ArgumentParser, Namespace
@@ -19,15 +20,8 @@ from tqdm import tqdm
 from layers import FixupCausalResBlock, PreActFixupCausalResBlock, input_to_stack, stack_to_output, GatedResBlock
 from utils.logging_helpers import sub_metric_log_dict
 from utils.argparse_helpers import booltype
+from train_helpers import idx_to_one_hot, bits_per_dim, mixup_data, mixup_criterion
 
-
-def bits_per_dim(mean_nll: torch.Tensor):
-    '''Assumes the nll was calculated with the natural logarithm'''
-    return mean_nll / np.log(2)
-
-def idx_to_one_hot(data: torch.LongTensor, num_classes: int) -> torch.FloatTensor:
-    return rearrange(F.one_hot(data, num_classes=num_classes),
-                     'b d h w c -> b c d h w').to(torch.float)
 
 
 class PixelCNN(pl.LightningModule):
@@ -37,7 +31,6 @@ class PixelCNN(pl.LightningModule):
         self._parse_input_args(args)
 
         self.train_metrics = nn.ModuleDict({
-            'accuracy': Accuracy(),
         })
         self.val_metrics = nn.ModuleDict({
             'accuracy': Accuracy(),
@@ -100,33 +93,54 @@ class PixelCNN(pl.LightningModule):
 
         metrics = self.train_metrics if mode == 'train' else self.val_metrics
 
-        loss, log_dict = self.loss_f(batch, batch_idx, metrics)
+        loss, log_dict = self.loss_f(batch, batch_idx, metrics, mode)
 
         self.log_dict({f'{mode}_{key}': val for key, val in log_dict.items()})
 
         return loss
 
-    def cross_entropy(self, batch, batch_idx, metrics: dict):
+    def cross_entropy(self, batch, batch_idx, metrics: dict, mode):
 
-        if len(batch) == 1 or not self.use_conditioning: # no condition present
-            data = batch[0]
-            condition = None
-        else:
-            data, condition = batch
-            condition = condition.squeeze(dim=1)
-            b, c, *dim = data.size()
+        with torch.no_grad():
 
-            condition = F.interpolate(
-                idx_to_one_hot(condition, num_classes=self.condition_dim),
-                size=dim, mode='trilinear'
-            ).detach()
-        data = data.squeeze(dim=1).detach()
+            if len(batch) == 1 or not self.use_conditioning: # no condition present
+                data = batch[0]
+                condition = None
+            else:
+                data, condition = batch
+                condition = condition.squeeze(dim=1)
+                b, c, *dim = data.size()
+
+                condition = F.interpolate(
+                    idx_to_one_hot(condition, num_classes=self.condition_dim),
+                    size=dim, mode='trilinear'
+                )
+
+            data = data.squeeze(dim=1)
+
+            target = data
+            model_input = idx_to_one_hot(data, num_classes=self.input_dim)
+            loss_f = F.cross_entropy
+
+            if self.mixup_alpha != 0 and mode == 'train':
+                model_input, condition, target, lam = mixup_data(x=model_input, y=target, alpha=self.mixup_alpha, condition=condition)
+                loss_f = mixup_criterion(criterion=loss_f, lam=lam)
+
+                if self.use_mixup_batch_hack:
+                    original_batch_size = slice(b//2)
+                    model_input, target, lam, condition = (
+                        model_input[original_batch_size],
+                        (target[0][original_batch_size], target[1][original_batch_size]),
+                        lam[original_batch_size],
+                        condition[original_batch_size] if condition is not None else None
+                    )
+
         logits = self(
-            data=idx_to_one_hot(data, num_classes=self.input_dim).detach(),
+            data=model_input,
             condition=condition
         )
 
-        unreduced_loss = F.cross_entropy(input=logits, target=data, reduction='none')
+        unreduced_loss = loss_f(input=logits, target=target, reduction='none')
         loss = unreduced_loss.mean()
 
         with torch.no_grad():
@@ -156,6 +170,8 @@ class PixelCNN(pl.LightningModule):
         self.use_conditioning = args.use_conditioning
         self.use_concat_activation = args.use_concat_activation
         self.bottleneck_divisor = args.bottleneck_divisor
+        self.mixup_alpha = args.mixup_alpha
+        self.use_mixup_batch_hack = args.use_mixup_batch_hack
 
         self.causal_conv = (
             GatedResBlock
@@ -163,7 +179,7 @@ class PixelCNN(pl.LightningModule):
             else (PreActFixupCausalResBlock
                   if args.use_pre_activation
                   else FixupCausalResBlock)
-        )   
+        )
 
         if args.metric == 'cross_entropy':
             self.loss_f = self.cross_entropy
@@ -191,7 +207,8 @@ class PixelCNN(pl.LightningModule):
         parser.add_argument('--use-concat-activation', default=False, type=booltype)
         parser.add_argument('--mixup-alpha', default=1, type=float,
                              help="Set to 1 to disable mixup")
-
+        parser.add_argument('--use-mixup-batch-hack', default=False, type=booltype,
+                             help=("Will double the batch size in the dataloader, for but only for mixing"))
         # Loss calculation specific
         parser.add_argument('--metric', choices=['cross_entropy'])
 
@@ -219,7 +236,7 @@ class PixelCNN(pl.LightningModule):
                 size=dims, mode='trilinear'
             ).to(torch.half)
             condition_cache = self._generate_condition_cache(condition)
-        breakpoint()
+
         # Full forward pass, to check for memory errors
         # self.forward(
         #     data=result,
@@ -230,6 +247,7 @@ class PixelCNN(pl.LightningModule):
         #     )
         # )
         # iterate over all dimensions
+
         max_dim = [0 for _ in dims]
         for dim in tqdm(product(*tuple(range(dim) for dim in dims)), total=math.prod(dims)):
             for i in range(len(max_dim)):

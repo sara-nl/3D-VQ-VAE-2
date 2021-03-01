@@ -1,4 +1,5 @@
 import math
+from random import randrange
 from functools import partial, lru_cache
 from itertools import product, chain
 from argparse import ArgumentParser, Namespace
@@ -19,15 +20,8 @@ from tqdm import tqdm
 from layers import CausalAttentionPixelBlock, PreActFixupCausalResBlock, input_to_stack, stack_to_output, GatedResBlock
 from utils.logging_helpers import sub_metric_log_dict
 from utils.argparse_helpers import booltype
+from train_helpers import idx_to_one_hot, bits_per_dim, mixup_data, mixup_criterion
 
-
-def bits_per_dim(mean_nll: torch.Tensor):
-    '''Assumes the nll was calculated with the natural logarithm'''
-    return mean_nll / np.log(2)
-
-def idx_to_one_hot(data: torch.LongTensor, num_classes: int) -> torch.FloatTensor:
-    return rearrange(F.one_hot(data, num_classes=num_classes),
-                     'b d h w c -> b c d h w').to(torch.float)
 
 
 class PixelSNAIL(pl.LightningModule):
@@ -75,7 +69,8 @@ class PixelSNAIL(pl.LightningModule):
                 in_channels=self.model_dim,
                 bottleneck_divisor=self.bottleneck_divisor,
                 causal_conv=partial(causal_conv, mask='B'),
-                num_layers=self.num_layers_per_block
+                num_layers=self.num_layers_per_block,
+                attention_dropout_prob=self.attention_dropout_prob
             )
             for _ in range(self.num_blocks)
 
@@ -109,13 +104,13 @@ class PixelSNAIL(pl.LightningModule):
 
         metrics = self.train_metrics if mode == 'train' else self.val_metrics
 
-        loss, log_dict = self.loss_f(batch, batch_idx, metrics)
+        loss, log_dict = self.loss_f(batch, batch_idx, metrics, mode)
 
         self.log_dict({f'{mode}_{key}': val for key, val in log_dict.items()})
 
         return loss
 
-    def cross_entropy(self, batch, batch_idx, metrics: dict):
+    def cross_entropy(self, batch, batch_idx, metrics: dict, mode='train'):
         # no_grad to save some MBs
         with torch.no_grad():
 
@@ -136,14 +131,22 @@ class PixelSNAIL(pl.LightningModule):
             background = self._generate_background((data.shape[0], *data.shape[-3:]))
             attn_mask = self._generate_attention_mask(data.shape[-3:])
 
+            target = data
+            model_input = idx_to_one_hot(data, num_classes=self.input_dim)
+            loss_f = F.cross_entropy
+
+            if self.mixup_alpha != 0 and mode == 'train':
+                model_input, condition, target, lam = mixup_data(x=model_input, y=target, alpha=self.mixup_alpha, condition=condition)
+                loss_f = mixup_criterion(criterion=loss_f, lam=lam)
+
         logits = self(
-            data=idx_to_one_hot(data, num_classes=self.input_dim),
-            background=background, 
+            data=model_input,
+            background=background,
             attn_mask=attn_mask,
             condition=condition
         )
 
-        unreduced_loss = F.cross_entropy(input=logits, target=data, reduction='none')
+        unreduced_loss = loss_f(input=logits, target=target, reduction='none')
         loss = unreduced_loss.mean()
 
         with torch.no_grad():
@@ -172,19 +175,10 @@ class PixelSNAIL(pl.LightningModule):
             'causal_dropout_prob',
             'attention_dropout_prob',
             'bottleneck_divisor',
-            'use_conditioning'
+            'use_conditioning',
+            'mixup_alpha'
         ):
             setattr(self, arg_name, getattr(args, arg_name))
-
-        # self.model_dim = args.model_dim
-        # self.kernel_size = args.kernel_size
-        # self.num_resblocks = args.num_resblocks
-        # self.causal_dropout_prob = args.causal_dropout_prob
-        # self.attention_dropout_prob = args.dropout_prob
-        # self.use_gated_block = args.use_gated_block
-        # self.use_conditioning = args.use_conditioning
-        # self.use_concat_activation = args.use_concat_activation
-        # self.bottleneck_divisor = args.bottleneck_divisor
 
         self.causal_conv = PreActFixupCausalResBlock
 
@@ -210,6 +204,7 @@ class PixelSNAIL(pl.LightningModule):
         parser.add_argument('--bottleneck-divisor', default=4, type=int,
                             help="Set to 1 to disable bottlenecking")
         parser.add_argument('--use-conditioning', default=False, type=booltype)
+        parser.add_argument('--mixup-alpha', default=0, type=float)
 
         # Loss calculation specific
         parser.add_argument('--metric', choices=['cross_entropy'])
@@ -227,8 +222,13 @@ class PixelSNAIL(pl.LightningModule):
     ):
         '''Warning: if applicable, the user is responsible for calling model.eval()!'''
         assert len(size) == 4
+        background = self._generate_background(size)
+
         batch, *dims = size
         size = (batch, self.input_dim, *dims)
+
+        # need to cast to tuple for lru_cache
+        attn_mask = self._generate_attention_mask(tuple(dims))
 
         result = torch.full(size, -1, dtype=torch.half, device=self.device) # mypy: ignore
 
@@ -239,6 +239,7 @@ class PixelSNAIL(pl.LightningModule):
             ).to(torch.half)
             condition_cache = self._generate_condition_cache(condition)
 
+
         max_dim = [0 for _ in dims]
         for dim in tqdm(product(*tuple(range(dim) for dim in dims)), total=math.prod(dims)):
             for i in range(len(max_dim)):
@@ -246,9 +247,13 @@ class PixelSNAIL(pl.LightningModule):
 
             current_slice = (..., *(slice(max_d) for max_d in max_dim))
             current_sample = (..., *(d for d in dim))
+            current_attn_mask = (slice(math.prod(max_dim)),) * 2
+
 
             out = self.forward(
                 data=result[current_slice],
+                attn_mask=attn_mask[current_attn_mask],
+                background=background[current_slice],
                 condition_cache=(
                     condition_cache.copy()
                     if condition is not None
@@ -283,7 +288,7 @@ class PixelSNAIL(pl.LightningModule):
             torch.linspace(start=-1, end=1, steps=h).view(1, 1, 1, 1, -1, 1).expand(3, b, 1, d, h, w),
             torch.linspace(start=-1, end=1, steps=w).view(1, 1, 1, 1, 1, -1).expand(3, b, 1, d, h, w)
         ], dim=2).to(self.device)
-    
+
     @lru_cache(maxsize=1)
     def _generate_attention_mask(self, sizes):
         size = math.prod(sizes)

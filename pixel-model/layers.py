@@ -122,9 +122,6 @@ class ConcatActivation(nn.Module):
 class CausalConv3dAdd(nn.Module):
     r'''
 
-    XXX: this information is outdated
-
-
     Layer that convolves a stack of three tensors in a causal manner.
     The stack of three tensors should be in the order:
     1. depth-wise
@@ -137,10 +134,6 @@ class CausalConv3dAdd(nn.Module):
     - The assumptions this module makes are quite subtle, and great care
       should be taken that none of these assumptions are broken in a different part
       of the user's code.
-    - It is the user's responsibility to merge the information of the 'depth' and 'height'
-      stack appropriately into the 'width' stack.
-      This means that somewhere before model output the following should be done:
-      `out = shift_down_3d(shift_backwards_3d(depth) + height) + width`
     - If causality is broken such that information flows directly from the
       input pixel to the output pixel, validation loss will go to zero almost immediately.
     - If the causality is not perfectly managed, the model as a whole will underperform.
@@ -459,6 +452,9 @@ class PreActFixupCausalResBlock(nn.Module):
                 assert self.condition is not None, 'Condition projection matrix not initialised!'
                 condition = self.condition(condition)
 
+            # without this check, accidental broadcasts may happen if batch_size == 1
+            assert torch.eq(*map(torch.as_tensor, (out.shape[1:], condition.shape))).all()
+
             # add condition equally and volumetrically to all stacks
             out = out + condition[(..., *(slice(d) for d in out.shape[-3:]))]
 
@@ -637,10 +633,11 @@ class CausalAttention(nn.Module):
 
         logits = torch.matmul(flat_q.transpose(3,4), flat_k)            # (B,nh,HW,dq) dot (B,nh,dq,HW) = (B,nh,HW,HW)
 
-        # replace dropped values with a very large negative number instead of -inf to prevent nans in the output
-        logits = self.dropout(logits)
-        logits = logits.masked_fill(logits == 0, -1e3)
+        if self.dropout.training:
+            logits = self.dropout(logits)
 
+            # replace dropped values with a very large negative number instead of -inf to prevent nans in the output
+            logits = logits.masked_fill(logits == 0, -1e3)
 
         logits = logits.masked_fill(~attn_mask, float('-inf'))
 
@@ -649,23 +646,6 @@ class CausalAttention(nn.Module):
         attn_out = torch.matmul(weights, flat_v.transpose(3,4))           # (B,nh,HW,HW) dot (B,nh,HW,dvh) = (B,nh,HW,dvh)
         attn_out = attn_out.transpose(3,4)                                # (B,nh,dvh,HW)
         return attn_out.reshape(stack_dim, b, -1, *dims)                              # (B,dv,H,W)
-
-
-# class CausalAttention(nn.Module):
-#     def __init__(self, *mha_args, **mha_kwargs):
-#         super().__init__()
-#         self.causal_attention = nn.ModuleList([
-#             nn.MultiheadAttention(*mha_args, **mha_kwargs)
-#             for _ in range(3)
-#         ])
-
-#     def forward(self, queries, keys, values, attn_mask):
-#         return restack(*(
-#             causal_attention(query, key, value, need_weights=False, attn_mask=attn_mask)
-#             for causal_attention, query, key, value in zip(
-#                 self.causal_attention, queries, keys, values
-#             )
-#         ))
 
 
 class CausalAttentionPixelBlock(nn.Module):

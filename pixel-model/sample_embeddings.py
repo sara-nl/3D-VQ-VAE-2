@@ -10,15 +10,13 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from filelock import FileLock
 
-from model import PixelSNAIL
+from pixelcnn import PixelCNN
+from pixelsnail import PixelSNAIL
 
 GPU = torch.device('cuda')
 
 def parse_arguments():
     parser = ArgumentParser()
-
-    # parser = pl.Trainer.add_argparse_args(parser)
-    # parser = PixelSNAIL.add_model_specific_args(parser)
 
     parser.add_argument("--model-checkpoint", type=Path, required=True)
     parser.add_argument("--db-path", type=Path, required=True)
@@ -32,6 +30,7 @@ def parse_arguments():
         'Number of samples to sample, defaults to number of conditions in db. '
         'Always samples conditions with least amount of samples first.'
     ))
+    parser.add_argument("--use-model", type=str, choices=['pixelcnn', 'pixelsnail'], default='pixelcnn')
     parser.add_argument("--batch-size", default=1, type=int)
     parser.add_argument("--tau", default=1.0, type=float, help="Temperature for softmax sampling")
 
@@ -101,10 +100,15 @@ def get_conditions(db, level, uuids):
     return torch.stack([db[level+1][uuid]['data'] for uuid in uuids])
 
 
-def main(model_checkpoint, db_path, level, size, num_samples, batch_size, tau):
+def main(model_checkpoint, use_model, db_path, level, size, num_samples, batch_size, tau):
     torch.cuda.empty_cache()
 
-    model = PixelSNAIL.load_from_checkpoint(model_checkpoint).to(GPU)
+    if use_model == 'pixelcnn':
+        model_class = PixelCNN
+    elif use_model == 'pixelsnail':
+        model_class = PixelSNAIL
+
+    model = model_class.load_from_checkpoint(model_checkpoint).to(GPU)
     model.eval()
 
     db_path = db_path.resolve()

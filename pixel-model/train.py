@@ -56,6 +56,9 @@ def main(args):
     torch.cuda.empty_cache()
     pl.trainer.seed_everything(seed=42)
 
+    if hasattr(args, 'use_mixup_batch_hack') and args.use_mixup_batch_hack == True:
+        args.batch_size *= 2
+
     datamodule = LMDBDataModule(path=args.dataset_path, embedding_id=args.level, batch_size=args.batch_size, num_workers=5)
 
     datamodule.setup()
