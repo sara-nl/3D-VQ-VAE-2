@@ -65,8 +65,8 @@ PYTHON_ARGS="\
 --db-path $IO_PATH \
 --level $HIERARCHY_LEVEL \
 --size 16 16 8 \
---num-samples 1 \
---batch-size 1 \
+--num-samples 2 \
+--batch-size 2 \
 --tau 0.01 \
 --use-model pixelsnail \
 "

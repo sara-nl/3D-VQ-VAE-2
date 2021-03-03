@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name pixelcnn-top-downscaled-mixup
+#SBATCH --job-name pixelcnn-top-downscaled-mixupfour
 #SBATCH -N 6
 #SBATCH -c 6
 #SBATCH --ntasks-per-node 4
@@ -86,7 +86,7 @@ $HIERARCHY_LEVEL \
 --use-conditioning True \
 --use-pre-activation True \
 --bottleneck-divisor 4 \
---mixup-alpha 0.4 \
+--mixup-alpha 4 \
 --use-mixup-batch-hack True \
 "
 echo "- found args $PYTHON_ARGS"

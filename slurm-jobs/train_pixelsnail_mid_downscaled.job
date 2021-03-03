@@ -1,11 +1,11 @@
 #!/bin/bash
 
-#SBATCH --job-name pixelsnail-mid-downscaled-mixup-lowishdropout-samplefix
-#SBATCH -N 3
+#SBATCH --job-name pixelsnail-mid-downscaled-mixup-dropoutzerotwo-mixupzerotwo-mixupbatchhack
+#SBATCH -N 6
 #SBATCH -c 6
 #SBATCH --ntasks-per-node 4
 #SBATCH -t 02-00:00:00
-#SBATCH -p gpu_titanrtx
+#SBATCH -p gpu_rtx2080ti
 #SBATCH -o slurm-%j-%x.out
 #SBATCh -e slurm-%j-%x.out
 export OMP_NUM_THREADS=6
@@ -77,17 +77,18 @@ PYTHON_ARGS="\
 $DATASET_INDIR \
 $HIERARCHY_LEVEL \
 --use-model pixelsnail \
---batch-size 2 \
+--batch-size 1 \
 --metric $METRIC \
 --lr "$(( $NUM_NODES * 5 ))"e-5 \
 --num_nodes $NUM_NODES \
 --model-dim 256 \
---causal-dropout-prob 0.3 \
+--causal-dropout-prob 0.2 \
 --attention-dropout-prob 0.0 \
 --use-conditioning False \
 --num-layers-per-block 5 \
---num-blocks 9 \
---mixup-alpha 0.4 \
+--num-blocks 8 \
+--mixup-alpha 0.2 \
+--use-mixup-batch-hack True \
 "
 echo "- found args $PYTHON_ARGS"
 
@@ -102,5 +103,5 @@ else
     echo "- copying dataset"
     rsync -ah --info=progress2 "$DATASET_PATH" "$INDIR"
     echo "- starting run"
-    srun python "$SCRIPTPATH" $PYTHON_ARGS
+    python "$SCRIPTPATH" $PYTHON_ARGS
 fi
