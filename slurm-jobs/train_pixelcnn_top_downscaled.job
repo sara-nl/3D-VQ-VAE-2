@@ -86,7 +86,7 @@ $HIERARCHY_LEVEL \
 --use-conditioning True \
 --use-pre-activation True \
 --bottleneck-divisor 4 \
---mixup-alpha 4 \
+--mixup-alpha 1 \
 --use-mixup-batch-hack True \
 "
 echo "- found args $PYTHON_ARGS"

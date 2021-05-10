@@ -88,7 +88,6 @@ $HIERARCHY_LEVEL \
 --num-layers-per-block 5 \
 --num-blocks 8 \
 --mixup-alpha 0.2 \
---use-mixup-batch-hack True \
 "
 echo "- found args $PYTHON_ARGS"
 

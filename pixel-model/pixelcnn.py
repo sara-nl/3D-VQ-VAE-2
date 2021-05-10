@@ -106,8 +106,10 @@ class PixelCNN(pl.LightningModule):
             if len(batch) == 1 or not self.use_conditioning: # no condition present
                 data = batch[0]
                 condition = None
+                b, c, *dim = data.size()
             else:
                 data, condition = batch
+
                 condition = condition.squeeze(dim=1)
                 b, c, *dim = data.size()
 
@@ -126,14 +128,6 @@ class PixelCNN(pl.LightningModule):
                 model_input, condition, target, lam = mixup_data(x=model_input, y=target, alpha=self.mixup_alpha, condition=condition)
                 loss_f = mixup_criterion(criterion=loss_f, lam=lam)
 
-                if self.use_mixup_batch_hack:
-                    original_batch_size = slice(b//2)
-                    model_input, target, lam, condition = (
-                        model_input[original_batch_size],
-                        (target[0][original_batch_size], target[1][original_batch_size]),
-                        lam[original_batch_size],
-                        condition[original_batch_size] if condition is not None else None
-                    )
 
         logits = self(
             data=model_input,

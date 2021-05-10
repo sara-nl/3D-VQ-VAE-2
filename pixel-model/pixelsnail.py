@@ -31,7 +31,6 @@ class PixelSNAIL(pl.LightningModule):
         self._parse_input_args(args)
 
         self.train_metrics = nn.ModuleDict({
-            'accuracy': Accuracy(),
         })
         self.val_metrics = nn.ModuleDict({
             'accuracy': Accuracy(),
@@ -117,6 +116,7 @@ class PixelSNAIL(pl.LightningModule):
             if len(batch) == 1 or not self.use_conditioning: # no condition present
                 data = batch[0]
                 condition = None
+                b, c, *dim = data.size()
             else:
                 data, condition = batch
                 condition = condition.squeeze(dim=1)
@@ -128,8 +128,6 @@ class PixelSNAIL(pl.LightningModule):
                 )
 
             data = data.squeeze(dim=1)
-            background = self._generate_background((data.shape[0], *data.shape[-3:]))
-            attn_mask = self._generate_attention_mask(data.shape[-3:])
 
             target = data
             model_input = idx_to_one_hot(data, num_classes=self.input_dim)
@@ -138,6 +136,9 @@ class PixelSNAIL(pl.LightningModule):
             if self.mixup_alpha != 0 and mode == 'train':
                 model_input, condition, target, lam = mixup_data(x=model_input, y=target, alpha=self.mixup_alpha, condition=condition)
                 loss_f = mixup_criterion(criterion=loss_f, lam=lam)
+
+            background = self._generate_background((model_input.shape[0], *model_input.shape[-3:]))
+            attn_mask = self._generate_attention_mask(model_input.shape[-3:])
 
         logits = self(
             data=model_input,
@@ -176,7 +177,7 @@ class PixelSNAIL(pl.LightningModule):
             'attention_dropout_prob',
             'bottleneck_divisor',
             'use_conditioning',
-            'mixup_alpha'
+            'mixup_alpha',
         ):
             setattr(self, arg_name, getattr(args, arg_name))
 
@@ -205,6 +206,8 @@ class PixelSNAIL(pl.LightningModule):
                             help="Set to 1 to disable bottlenecking")
         parser.add_argument('--use-conditioning', default=False, type=booltype)
         parser.add_argument('--mixup-alpha', default=0, type=float)
+        parser.add_argument('--use-mixup-batch-hack', default=False, type=booltype,
+                            help=("Will double the batch size in the dataloader, for but only for mixing"))
 
         # Loss calculation specific
         parser.add_argument('--metric', choices=['cross_entropy'])
