@@ -452,11 +452,13 @@ class PreActFixupCausalResBlock(nn.Module):
                 assert self.condition is not None, 'Condition projection matrix not initialised!'
                 condition = self.condition(condition)
 
+            condition = condition[(..., *(slice(d) for d in out.shape[-3:]))]
+
             # without this check, accidental broadcasts may happen if batch_size == 1
             assert torch.eq(*map(torch.as_tensor, (out.shape[1:], condition.shape))).all()
 
             # add condition equally and volumetrically to all stacks
-            out = out + condition[(..., *(slice(d) for d in out.shape[-3:]))]
+            out = out + condition
 
         out = self.activation(out + self.bias3a)
         out = self.branch_conv3(out + self.bias3b)

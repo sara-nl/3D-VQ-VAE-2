@@ -38,9 +38,7 @@ def mixup_data(x, y, alpha=1.0, condition=None):
     '''Compute the mixup data. Return mixed inputs, pairs of targets, and lambda'''
     batch_size = x.size()[0]
 
-    lam = torch.as_tensor(np.random.beta(alpha, alpha, batch_size), device=x.device, dtype=x.dtype)
-    # what a bad slicing hack, cmon pytorch, I just want to left broadcast
-    lam = lam[(slice(batch_size), *((None,)*(x.dim()-1)))]
+    lam = torch.as_tensor(np.random.beta(alpha, alpha), device=x.device, dtype=x.dtype)
 
     # The randomness is controlled by the sampled lambda,
     # so there is no reason a sample should get mixed with itself.
