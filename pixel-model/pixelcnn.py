@@ -232,21 +232,34 @@ class PixelCNN(pl.LightningModule):
             condition_cache = self._generate_condition_cache(condition)
 
         # Full forward pass, to check for memory errors
-        # self.forward(
-        #     data=result,
-        #     condition_cache=(
-        #         condition_cache.copy()
-        #         if condition is not None
-        #         else None
-        #     )
-        # )
-        # iterate over all dimensions
+        self.forward(
+            data=result,
+            condition_cache=(
+                condition_cache.copy()
+                if condition is not None
+                else None
+            )
+        )
+
+        # iterate over all dimensions.
+        # outputs the combination of all indices, i.e.:
+        # (0, 0, 0),
+        # (0, 0, 1),
+        # (0, 0, 2),
+        #  ...,
+        # (0, 1, 0),
+        # (0, 1, 1),
+        # ....,
+        # (1, 0, 0),
+        # ...,
+        #  etc.
+        #
+        # max_dim is used to retain the max size the image had in every dimension
 
         max_dim = [0 for _ in dims]
         for dim in tqdm(product(*tuple(range(dim) for dim in dims)), total=math.prod(dims)):
             for i in range(len(max_dim)):
                 max_dim[i] = max(dim[i]+1, max_dim[i])
-
             current_slice = (..., *(slice(max_d) for max_d in max_dim))
             current_sample = (..., *(d for d in dim))
 
@@ -259,9 +272,16 @@ class PixelCNN(pl.LightningModule):
                 )
             )
 
-            sample = sampling_f(out[current_sample])
+            # ugly hack to fix an issue that the sampling keeps outputing 0's
+            # FIXME: actually fix the issue
+            while True:
+                sample = sampling_f(out[current_sample])
+                if torch.argmax(sample) != 0:
+                    break
+                print('0 sampled!')
 
             result[current_sample] = sample
+
 
         # FIXME: remove the argmax
         return torch.argmax(result, dim=1)

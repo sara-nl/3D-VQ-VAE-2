@@ -194,8 +194,6 @@ class CausalConv3dAdd(nn.Module):
         height_size = max(kernel_size-1, 1)
         width_size  = max(kernel_size//2 + (1 if mask == 'B' else 0), 1)
 
-        self.half_kernel = kernel_size // 2
-
         # Split depth, height, width conv into three, allowing the receptive field to grow without blindspot
         # See https://papers.nips.cc/paper/2016/file/b1301141feffabac455e1f90a7de2054-Paper.pdf figure 1.
         self.depth_conv = nn.Conv3d(kernel_size=(depth_size, kernel_size, kernel_size), **conv_kwargs)
@@ -221,8 +219,7 @@ class CausalConv3dAdd(nn.Module):
         height = self.height_conv(F.pad(height, pad=self.height_pad, mode=self.padding_mode))
         width = self.width_conv(F.pad(width, pad=self.width_pad, mode=self.padding_mode))
 
-
-        return rearrange([depth, height, width], 'dim b c d h w -> dim b c d h w')
+        return restack(depth, height, width)
 
 
 class ExpandRFConv(nn.Module):

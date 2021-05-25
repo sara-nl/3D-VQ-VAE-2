@@ -24,30 +24,30 @@ def main(args: Namespace):
 
     db = torch.load(args.db_path)
 
-    for i, embedding_0 in enumerate(db[1].values()):
-        # embedding_1 = db[1][embedding_0['condition']]
-        # embedding_2 = db[2][embedding_1['condition']]
-        embedding_1 = embedding_0
-        embedding_0 = {'data': torch.zeros((64,64,32)).long()}
+    for embedding_0_key, embedding_0 in db[0].items():
+        embedding_1_key = embedding_0['condition']
+        embedding_1 = db[1][embedding_1_key]
+
+        # issue where the pixelcnn samples 0's
+        success = 'failure' if torch.all(embedding_0['data'][-1] == 0) else 'success'
 
         embeddings = [
             quantizer.embed_code(embedding['data'].cuda().unsqueeze(dim=0)).permute(0, 4, 1, 2, 3)
             for embedding, quantizer
             in zip((embedding_0, embedding_1), model.encoder.quantize)
         ]
-        breakpoint()
+
         print("- Performing forward pass")
         with torch.cuda.amp.autocast():
             res = model.decode(embeddings)
             res = torch.nn.functional.elu(res)
-        # res = inverse_softplus(res)
 
         res = res.squeeze().detach().cpu().numpy()
         res = res * scale_val - scale_val
         res = np.rint(res).astype(np.int)
 
         print("- Writing to nrrd")
-        nrrd.write(str(args.out_path) + f'_{i}.nrrd', res, header={'spacings': (0.976, 0.976, 3)})
+        nrrd.write(str(args.out_path) + f'_{success}_{str(embedding_1_key)}_{str(embedding_0_key)}.nrrd', res, header={'spacings': (0.976, 0.976, 3)})
 
         print("- Done")
 
