@@ -3,6 +3,9 @@
 `pip install .`  
 
 # Checkpoints / Codes / Samples
+All checkpoints, codes, and samples are available at [https://surfdrive.surf.nl/files/index.php/s/xY7bwjrgfnhPCAt]().  
+Simply copy+pasting the folder structure over the root of this reposity is sufficient.  
+For completeness, the relative path (from root) of each checkpoint/code/sample is listed in the following table:  
 | Checkpoints | Full size (512×512×128) | Downscaled (256×256×128) |
 |-|-|-|
 | AE | [3-layer](slurm-jobs/lightning_logs/version_7446231/checkpoints/epoch=1214-step=128683.ckpt) | [2-layer](slurm-jobs/lightning_logs/version_7464547/checkpoints/epoch=279-step=29679.ckpt) |
