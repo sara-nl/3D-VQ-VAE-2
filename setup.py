@@ -9,7 +9,7 @@ setuptools.setup(
     author="Robert Jan Schlimbach",
     description="3D VQ-VAE-2 for high-resolution CT scan synthesis",
     long_description=long_description,
-    url="https://github.com/sara-nl/vq-vae-2-pytorch/",
+    url="https://github.com/sara-nl/3D-VQ-VAE-2/",
     packages=setuptools.find_packages(),
     classifiers=[
         "Programming Language :: Python :: 3",
