@@ -4,10 +4,10 @@ with open("README.md", "r") as fh:
     long_description = fh.read()
 
 setuptools.setup(
-    name="hpc-generative-models",
-    version="0.0.1",
+    name="3D-VQ-VAE-2",
+    version="1.0.0",
     author="Robert Jan Schlimbach",
-    description="A collection of hpc generative models",
+    description="3D VQ-VAE-2 for high-resolution CT scan synthesis",
     long_description=long_description,
     url="https://github.com/sara-nl/vq-vae-2-pytorch/",
     packages=setuptools.find_packages(),
