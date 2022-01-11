@@ -1,6 +1,6 @@
 import math
 from random import randrange
-from functools import partial
+from functools import partial, lru_cache
 from itertools import product, chain
 from argparse import ArgumentParser, Namespace
 from typing import Union, Callable, Optional, Type, Dict, Tuple, Any, List, Sequence
@@ -17,14 +17,14 @@ from einops import rearrange, repeat
 from pytorch_lightning.metrics import Accuracy, Precision, Recall
 from tqdm import tqdm
 
-from layers import FixupCausalResBlock, PreActFixupCausalResBlock, input_to_stack, stack_to_output, GatedResBlock
+from pixel_model.layers import CausalAttentionPixelBlock, PreActFixupCausalResBlock, input_to_stack, stack_to_output, GatedResBlock
+from pixel_model.train_helpers import idx_to_one_hot, bits_per_dim, mixup_data, mixup_criterion
 from utils.logging_helpers import sub_metric_log_dict
 from utils.argparse_helpers import booltype
-from train_helpers import idx_to_one_hot, bits_per_dim, mixup_data, mixup_criterion
 
 
 
-class PixelCNN(pl.LightningModule):
+class PixelSNAIL(pl.LightningModule):
     def __init__(self, args):
         super().__init__()
         self.save_hyperparameters()
@@ -50,19 +50,29 @@ class PixelCNN(pl.LightningModule):
             kernel_size=1
         ) if self.use_conditioning else None
 
+        causal_conv = partial(
+            self.causal_conv,
+            in_channels=self.model_dim,
+            out_channels=self.model_dim,
+            kernel_size=self.kernel_size,
+            dropout_prob=self.causal_dropout_prob,
+            condition_dim=condition_dim,
+            condition_kernel_size=1,
+            bottleneck_divisor=self.bottleneck_divisor,
+        )
+
+        self.to_causal = causal_conv(mask='A')
+
         self.layers = nn.ModuleList([
-            self.causal_conv(
+            CausalAttentionPixelBlock(
                 in_channels=self.model_dim,
-                out_channels=self.model_dim,
-                kernel_size=self.kernel_size,
-                mask='A' if i == 0 else 'B',
-                dropout_prob=self.dropout_prob,
-                condition_dim=condition_dim,
-                condition_kernel_size=1,
                 bottleneck_divisor=self.bottleneck_divisor,
-                concat_activation=self.use_concat_activation,
+                causal_conv=partial(causal_conv, mask='B'),
+                num_layers=self.num_layers_per_block,
+                attention_dropout_prob=self.attention_dropout_prob
             )
-            for i in range(self.num_resblocks+1)
+            for _ in range(self.num_blocks)
+
         ])
 
         self.parse_output = nn.Conv3d(
@@ -71,7 +81,7 @@ class PixelCNN(pl.LightningModule):
             kernel_size=1,
         )
 
-        num_layers = self.num_resblocks+1 # plus input/output resblocks
+        num_layers = self.num_blocks*self.num_layers_per_block +1 # plus input resblock
         self.apply(
             lambda layer: layer.initialize_weights(num_layers=num_layers)
                           if isinstance(layer, PreActFixupCausalResBlock)
@@ -99,8 +109,8 @@ class PixelCNN(pl.LightningModule):
 
         return loss
 
-    def cross_entropy(self, batch, batch_idx, metrics: dict, mode):
-
+    def cross_entropy(self, batch, batch_idx, metrics: dict, mode='train'):
+        # no_grad to save some MBs
         with torch.no_grad():
 
             if len(batch) == 1 or not self.use_conditioning: # no condition present
@@ -109,7 +119,6 @@ class PixelCNN(pl.LightningModule):
                 b, c, *dim = data.size()
             else:
                 data, condition = batch
-
                 condition = condition.squeeze(dim=1)
                 b, c, *dim = data.size()
 
@@ -128,9 +137,13 @@ class PixelCNN(pl.LightningModule):
                 model_input, condition, target, lam = mixup_data(x=model_input, y=target, alpha=self.mixup_alpha, condition=condition)
                 loss_f = mixup_criterion(criterion=loss_f, lam=lam)
 
+            background = self._generate_background((model_input.shape[0], *model_input.shape[-3:]))
+            attn_mask = self._generate_attention_mask(model_input.shape[-3:])
 
         logits = self(
             data=model_input,
+            background=background,
+            attn_mask=attn_mask,
             condition=condition
         )
 
@@ -155,25 +168,20 @@ class PixelCNN(pl.LightningModule):
         if not args.use_conditioning:
             self.condition_dim = 0
 
-        # TODO: replace with attrsetter
-        self.model_dim = args.model_dim
-        self.kernel_size = args.kernel_size
-        self.num_resblocks = args.num_resblocks
-        self.dropout_prob = args.dropout_prob
-        self.use_gated_block = args.use_gated_block
-        self.use_conditioning = args.use_conditioning
-        self.use_concat_activation = args.use_concat_activation
-        self.bottleneck_divisor = args.bottleneck_divisor
-        self.mixup_alpha = args.mixup_alpha
-        self.use_mixup_batch_hack = args.use_mixup_batch_hack
+        for arg_name in (
+            'model_dim',
+            'kernel_size',
+            'num_layers_per_block',
+            'num_blocks',
+            'causal_dropout_prob',
+            'attention_dropout_prob',
+            'bottleneck_divisor',
+            'use_conditioning',
+            'mixup_alpha',
+        ):
+            setattr(self, arg_name, getattr(args, arg_name))
 
-        self.causal_conv = (
-            GatedResBlock
-            if args.use_gated_block
-            else (PreActFixupCausalResBlock
-                  if args.use_pre_activation
-                  else FixupCausalResBlock)
-        )
+        self.causal_conv = PreActFixupCausalResBlock
 
         if args.metric == 'cross_entropy':
             self.loss_f = self.cross_entropy
@@ -189,20 +197,18 @@ class PixelCNN(pl.LightningModule):
         # Model specific arguments
         parser.add_argument('--model-dim', default=32, type=int)
         parser.add_argument('--kernel-size', default=3, type=int)
-        parser.add_argument('--num-resblocks', default=18, type=int)
-        parser.add_argument('--dropout-prob', default=0.5, type=float,
+        parser.add_argument('--num-layers-per-block', default=5, type=int)
+        parser.add_argument('--num-blocks', default=5, type=int)
+        parser.add_argument('--causal-dropout-prob', default=0.5, type=float)
+        parser.add_argument('--attention-dropout-prob', default=0.5, type=float,
                             help="Set to 0 to disable dropout.")
-        parser.add_argument('--use-pre-activation', default=False, type=booltype)
-        parser.add_argument('--use-gated-block', default=False, type=booltype)
         parser.add_argument('--bottleneck-divisor', default=4, type=int,
-                            help=("Ignored if `--use-pre-activation False` is passed. "
-                                  "Set to 1 to disable bottlenecking"))
+                            help="Set to 1 to disable bottlenecking")
         parser.add_argument('--use-conditioning', default=False, type=booltype)
-        parser.add_argument('--use-concat-activation', default=False, type=booltype)
-        parser.add_argument('--mixup-alpha', default=1, type=float,
-                             help="Set to 1 to disable mixup")
+        parser.add_argument('--mixup-alpha', default=0, type=float)
         parser.add_argument('--use-mixup-batch-hack', default=False, type=booltype,
-                             help=("Will double the batch size in the dataloader, for but only for mixing"))
+                            help=("Will double the batch size in the dataloader, for but only for mixing"))
+
         # Loss calculation specific
         parser.add_argument('--metric', choices=['cross_entropy'])
 
@@ -219,8 +225,13 @@ class PixelCNN(pl.LightningModule):
     ):
         '''Warning: if applicable, the user is responsible for calling model.eval()!'''
         assert len(size) == 4
+        background = self._generate_background(size)
+
         batch, *dims = size
         size = (batch, self.input_dim, *dims)
+
+        # need to cast to tuple for lru_cache
+        attn_mask = self._generate_attention_mask(tuple(dims))
 
         result = torch.full(size, -1, dtype=torch.half, device=self.device) # mypy: ignore
 
@@ -231,40 +242,21 @@ class PixelCNN(pl.LightningModule):
             ).to(torch.half)
             condition_cache = self._generate_condition_cache(condition)
 
-        # Full forward pass, to check for memory errors
-        self.forward(
-            data=result,
-            condition_cache=(
-                condition_cache.copy()
-                if condition is not None
-                else None
-            )
-        )
-
-        # iterate over all dimensions.
-        # outputs the combination of all indices, i.e.:
-        # (0, 0, 0),
-        # (0, 0, 1),
-        # (0, 0, 2),
-        #  ...,
-        # (0, 1, 0),
-        # (0, 1, 1),
-        # ....,
-        # (1, 0, 0),
-        # ...,
-        #  etc.
-        #
-        # max_dim is used to retain the max size the image had in every dimension
 
         max_dim = [0 for _ in dims]
         for dim in tqdm(product(*tuple(range(dim) for dim in dims)), total=math.prod(dims)):
             for i in range(len(max_dim)):
                 max_dim[i] = max(dim[i]+1, max_dim[i])
+
             current_slice = (..., *(slice(max_d) for max_d in max_dim))
             current_sample = (..., *(d for d in dim))
+            current_attn_mask = (slice(math.prod(max_dim)),) * 2
+
 
             out = self.forward(
                 data=result[current_slice],
+                attn_mask=attn_mask[current_attn_mask],
+                background=background[current_slice],
                 condition_cache=(
                     condition_cache.copy()
                     if condition is not None
@@ -272,16 +264,9 @@ class PixelCNN(pl.LightningModule):
                 )
             )
 
-            # ugly hack to fix an issue that the sampling keeps outputing 0's
-            # FIXME: actually fix the issue
-            while True:
-                sample = sampling_f(out[current_sample])
-                if torch.argmax(sample) != 0:
-                    break
-                print('0 sampled!')
+            sample = sampling_f(out[current_sample])
 
             result[current_sample] = sample
-
 
         # FIXME: remove the argmax
         return torch.argmax(result, dim=1)
@@ -295,21 +280,41 @@ class PixelCNN(pl.LightningModule):
         return deque([layer.condition(condition) for layer in self.layers])
 
 
-    def forward( # mypy: ignore
+    @lru_cache(maxsize=1)
+    def _generate_background(self, sizes):
+        # TODO: refactor
+        # Yes, the shapes are that big
+        # dim=2 is the channel dim
+        b, d, h, w = sizes
+        return torch.cat([
+            torch.linspace(start=-1, end=1, steps=d).view(1, 1, 1, -1, 1, 1).expand(3, b, 1, d, h, w),
+            torch.linspace(start=-1, end=1, steps=h).view(1, 1, 1, 1, -1, 1).expand(3, b, 1, d, h, w),
+            torch.linspace(start=-1, end=1, steps=w).view(1, 1, 1, 1, 1, -1).expand(3, b, 1, d, h, w)
+        ], dim=2).to(self.device)
+
+    @lru_cache(maxsize=1)
+    def _generate_attention_mask(self, sizes):
+        size = math.prod(sizes)
+        return torch.tril(torch.ones((size, size))).to(self.device, torch.bool)
+
+
+    def forward( # type: ignore
         self,
         data: torch.LongTensor,
+        background: torch.Tensor,
+        attn_mask: torch.BoolTensor,
         condition: torch.LongTensor = None,
-        # The args below are purely for performance reasons
         condition_cache: Union[deque, None] = None
     ): # type: ignore
         '''Note: the user is responsible for making sure that condition is an appropriate size'''
 
         stack = input_to_stack(self.parse_input(data))
 
+        stack = self.to_causal(stack, condition=condition)
         if self.embed_condition is not None and condition_cache is None:
             condition = self.embed_condition(condition)
 
         for layer in self.layers:
-            stack = layer(stack=stack, condition=condition, condition_cache=condition_cache)
+            stack = layer(stack, background, attn_mask, condition, condition_cache)
 
         return self.parse_output(stack_to_output(stack))

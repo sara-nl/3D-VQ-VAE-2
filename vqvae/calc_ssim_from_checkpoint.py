@@ -10,7 +10,7 @@ from tqdm import tqdm
 from einops import rearrange
 import torch.nn as nn
 
-from model import VQVAE
+from vqvae.model import VQVAE
 from utils import CTDataModule
 from metrics.evaluate import SSIM3DSlices
 

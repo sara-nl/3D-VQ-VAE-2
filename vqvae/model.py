@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributions.normal import Normal
 
-from layers import Encoder, Decoder, FixupResBlock, PreActFixupResBlock, EvonormResBlock, Encoder2
+from vqvae.layers import Encoder, Decoder, FixupResBlock, PreActFixupResBlock, EvonormResBlock, Encoder2
 from utils import ExtractCenterCylinder
 from metrics.distribution import Logistic, mixture_nll_loss, generic_nll_loss
 from metrics.evaluate import nmse, psnr, SSIM3DSlices

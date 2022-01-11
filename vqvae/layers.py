@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from evonorm import EvoNorm3DS0
+from vqvae.evonorm import EvoNorm3DS0
 
 
 class EvonormResBlock(nn.Module):

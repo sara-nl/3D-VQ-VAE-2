@@ -12,8 +12,8 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from filelock import FileLock
 
-from pixelcnn import PixelCNN
-from pixelsnail import PixelSNAIL
+from pixel_model.pixelcnn import PixelCNN
+from pixel_model.pixelsnail import PixelSNAIL
 
 GPU = torch.device('cuda')
 

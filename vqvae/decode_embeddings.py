@@ -8,7 +8,7 @@ import numpy as np
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from model import VQVAE
+from vqvae.model import VQVAE
 from utils import CTScanDataset, DepthPadAndCrop
 
 def inverse_softplus(x):

@@ -7,7 +7,7 @@ import torch
 import numpy as np
 from tqdm import tqdm
 
-from model import VQVAE
+from vqvae.model import VQVAE
 from utils import CTDataModule
 
 

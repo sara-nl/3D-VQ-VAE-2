@@ -8,7 +8,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 from monai import transforms
 
-from model import VQVAE
+from vqvae.model import VQVAE
 from utils import CTScanDataset, DepthPadAndCrop, CTDataModule
 
 

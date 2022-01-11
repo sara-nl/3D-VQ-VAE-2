@@ -4,8 +4,8 @@ from argparse import ArgumentParser
 import torch
 import pytorch_lightning as pl
 
-from pixelcnn import PixelCNN
-from pixelsnail import PixelSNAIL
+from pixel_model.pixelcnn import PixelCNN
+from pixel_model.pixelsnail import PixelSNAIL
 from utils.load_lmdb_dataset import LMDBDataModule
 
 def parse_arguments():

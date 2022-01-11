@@ -2,7 +2,7 @@ import torch
 import matplotlib.pyplot as plt
 from torchvision.utils import make_grid
 
-from model import CausalConv3dAdd
+from pixel_model.layers import CausalConv3dAdd
 
 if __name__ == '__main__':
     inp = torch.zeros((1, 3, 20,20,20))
